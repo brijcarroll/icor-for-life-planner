@@ -6,6 +6,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.13.0] - 2026-09-15
+
+### Fixed
+- **Sync no longer marks live tasks as done when it could not read all of
+  them.** When a source has more open items than one sync can read in one
+  go, the planner used to treat everything it had not seen as finished,
+  tick it off in your vault, and, if you had switched on completing at the
+  source, close it in Todoist, ClickUp or your mailbox too. It now notices
+  when it has only read part of your open list, shows one line on the board
+  saying so, and marks nothing done until it has read the whole list. The
+  same applies when a mailbox has more starred mail than one read takes,
+  when Microsoft hands back a paging link the planner will not follow, and
+  when you change your ClickUp filter, so switching subtasks off no longer
+  records them as achievements. Everything it did read still lands on the
+  board as usual.
+
+  Reported by Ian Slattery in the bug reports channel.
+
 ## [0.12.0] - 2026-09-08
 
 ### Added
