@@ -8,9 +8,6 @@ Releases before 0.12.0 carry their notes on the GitHub release itself
 
 ## [0.14.0] - 2026-09-15
 
-> Pending Flint review. Not released until he has read the new view
-> registration, the manifest and the note the plugin now creates.
-
 ### Added
 - **The week note, and a tab that reads and writes it.** Beside the board
   there is now one note per week in `02 Planner/Weeks/`, holding the two
