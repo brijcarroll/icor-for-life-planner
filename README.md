@@ -55,6 +55,33 @@ your calendar, your routines and your habits.
 **Routines and habits** live here too, so the things you do every week are on
 the same surface as the things you only do once.
 
+Any card can be **pinned to this week** from its menu. Pinned cards sit at the
+top of the tray under PINNED THIS WEEK and wear a WEEK chip on the board.
+
+## The week note
+
+Beside the board there is one note per week, in `02 Planner/Weeks/`, and a tab
+that reads and writes it. It holds two things.
+
+**Weekly priorities.** What you are trying to achieve this week, one line
+each, with a box you tick when it is done. Not tasks: outcomes. A task can
+serve one.
+
+**Daily highlights.** One sentence per day: the one thing that, if it happens,
+makes the day a win. You set it in the morning and confirm it in the evening,
+done or not done. Only today's row takes input; the rest of the week is what
+it already says.
+
+The note is plain markdown with two headings, so you can write in it by hand
+and the tab reads exactly what you wrote. It is created the first time you put
+something in it, and never before.
+
+## Linking a task to a note
+
+A card's menu can point it at the note the work is really for, usually a
+project or a key element. The link lives on the planner side only, nothing is
+written into the note you point at, and no sync run ever changes it.
+
 ## Where your keys live
 
 One setting decides whether your keys stay on this device or follow the vault

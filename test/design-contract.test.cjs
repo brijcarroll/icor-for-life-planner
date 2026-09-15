@@ -35,6 +35,7 @@ test('every plugin surface declares data-ink-plugin (the theme contract)', () =>
     /addClass\('iplan-root'\);\s*\n\s*markInkPlugin\(/,
     /addClass\('iplan-tray-root'\);\s*\n\s*markInkPlugin\(/,
     /addClass\('iplan-event-modal'\);\s*\n\s*markInkPlugin\(/,
+    /addClass\('iplan-week-root'\);\s*\n\s*markInkPlugin\(/,
   ]) assert.match(main, surface, `a surface mounts without declaring itself: ${surface}`);
 
   // Read from the manifest, never a literal, so a rename cannot unhook it.

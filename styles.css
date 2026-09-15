@@ -9,7 +9,7 @@
  * controls and the calendar swatches resolve the tokens they name.
  * .iplan-next-strip: the strip lives in the sidebar, outside every root
  * above, so it is listed here to read the same aliases. */
-.iplan-next-strip, .iplan-root, .iplan-tray-root, .iplan-settings {
+.iplan-next-strip, .iplan-root, .iplan-tray-root, .iplan-week-root, .iplan-settings {
   --iplan-marker: var(--ink-marker, #ff5a2d);
   --iplan-paper: var(--ink-paper, var(--text-normal));
   --iplan-dim: var(--ink-paper-dim, var(--text-muted));
@@ -50,6 +50,7 @@
 
 /* mono kicker voice */
 .iplan-kicker, .iplan-week-label, .iplan-day-head, .iplan-chip,
+.iplan-week-day, .iplan-week-progress,
 .iplan-tray-section-head, .iplan-tray-count, .iplan-foot, .iplan-tray-foot,
 .iplan-split-time, .iplan-lane-empty, .iplan-nav-today, .iplan-day-now,
 .iplan-card-meta, .iplan-event-time {
@@ -1513,4 +1514,65 @@ ul.iplan-settings-list li { margin: 3px 0; }
   .iplan-tray-root button.iplan-habit-menu-btn,
   .iplan-tray-root button.iplan-habits-archived-head { min-height: 44px; }
   .iplan-tray-root input.iplan-habit-monthday-input { font-size: 16px; }
+}
+
+/* ------------------------------------------------- week view (0.14.0) ---- */
+/* The week note's two blocks, in the board's own grammar: hairlines and
+ * whitespace, no surfaces, the marker only on today. Nothing here invents a
+ * colour; every rule names a token declared at the top of this file. */
+
+.iplan-week-root {
+  padding: 24px 28px 40px;
+  overflow-y: auto;
+}
+
+.iplan-week-section { margin-top: 28px; }
+
+.iplan-week-progress {
+  font-size: 10px;
+  color: var(--iplan-dim);
+  margin: 4px 0 10px;
+}
+
+.iplan-week-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--iplan-hairline-subtle);
+}
+
+.iplan-week-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--iplan-hairline-subtle);
+}
+
+/* Today is the only row that takes input, so it is the only row the marker
+ * touches: a left edge, never a fill. */
+.iplan-week-row.is-today { box-shadow: inset 2px 0 0 0 var(--iplan-marker); padding-left: 10px; }
+
+.iplan-week-row-label { flex: 1 1 auto; color: var(--iplan-paper); }
+.iplan-week-row-label.is-done { color: var(--iplan-dim); text-decoration: line-through; }
+.iplan-week-row-label.is-empty { color: var(--iplan-faint); font-style: italic; }
+
+.iplan-week-day {
+  flex: 0 0 auto;
+  min-width: 92px;
+  font-size: 10px;
+  color: var(--iplan-dim);
+}
+
+.iplan-week-row input[type="text"] { flex: 1 1 auto; }
+
+.iplan-chip.iplan-week-done { color: var(--iplan-success); border-color: color-mix(in srgb, var(--iplan-success) 55%, transparent); }
+.iplan-chip.iplan-week-missed { color: var(--iplan-overdue); border-color: color-mix(in srgb, var(--iplan-overdue) 55%, transparent); }
+.iplan-chip.iplan-week-pending,
+.iplan-chip.iplan-week-skipped,
+.iplan-chip.iplan-week-unknown { color: var(--iplan-faint); }
+
+@media (any-pointer: coarse) {
+  .iplan-week-root input[type="checkbox"],
+  .iplan-week-root .iplan-seg-btn { min-height: 44px; }
+  .iplan-week-root input[type="text"] { font-size: 16px; }
 }

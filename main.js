@@ -42,6 +42,9 @@ const {
 
 const BOARD_VIEW_TYPE = 'icor-for-life-planner-board';
 const TRAY_VIEW_TYPE = 'icor-for-life-planner-tray';
+// The week note's own tab (0.14.0): the weekly priorities and the daily
+// highlights of one ISO week.
+const WEEK_VIEW_TYPE = 'icor-for-life-planner-week';
 // The version lives in manifest.json only (this.manifest.version at runtime).
 // A second copy here drifted one release behind and nothing read it. The
 // plugin's own folder likewise comes off the manifest (gitignoreLineFor).
@@ -986,6 +989,10 @@ function plannerPaths(settings) {
     // Habit notes (0.10.0): one per habit, under the room.
     habits: `${root}/Habits`,
     isHabit: (path) => typeof path === 'string' && path.startsWith(`${root}/Habits/`),
+    // Week notes (0.14.0): one per ISO week, named by the week itself.
+    weeks: `${root}/Weeks`,
+    isWeek: (path) => typeof path === 'string' && path.startsWith(`${root}/Weeks/`),
+    weekNote: (iso) => `${root}/Weeks/${iso}.md`,
   };
 }
 
@@ -4183,8 +4190,37 @@ function plannerToolbarMountPoint(root) {
  *   status: open|done         - SOURCE truth, written by reconcile
  *   planned_day / planned_half / planned_order - the board placement
  *   done_local / weekly_goal  - planner-local flags (never written to source)
+ *   linked_note               - plan-owned: the note this task is FOR
  * The AI team edits the same fields to move items; the board re-renders live.
+ *
+ * PLAN-OWNED FIELDS (PLAN_OWNED_ITEM_FIELDS) are the planner's own half of
+ * the note. A sync run pulls what the source owns and never touches these:
+ * updateItemFile goes through processFrontMatter and assigns by name, so a
+ * field it does not name survives every pull by construction. That is a
+ * property worth a test rather than a comment, and vault-writes.test.cjs
+ * carries it.
+ *
+ * `linked_note` (0.14.0) is the same field name `planner-habit` already uses
+ * for the same meaning: a wikilink to the note where the MEANING of the thing
+ * lives, usually a Project or a Key Element in My Life. The planner never
+ * writes into that note and never reads it for the board; it holds the
+ * pointer so the vault's own scripts can count a week's committed time
+ * against the project it belongs to.
  * ========================================================================== */
+
+// The fields the planner owns on an item note. Sync pulls the rest and leaves
+// every one of these alone.
+const PLAN_OWNED_ITEM_FIELDS = [
+  'planned_day', 'planned_half', 'planned_order', 'done_local', 'weekly_goal', 'linked_note',
+];
+
+// A linked-note value as it is STORED: `[[Note name]]`, or null for none.
+// Accepts a bare name, a wikilink, or a wikilink with an alias or a heading,
+// and keeps only the note it names - the same shape habitFrontmatterOf writes.
+function normalizeLinkedNote(raw) {
+  const base = wikilinkBasename(raw);
+  return base ? `[[${base}]]` : null;
+}
 
 // The normalizer, pure and shared: one place decides what a frontmatter block
 // MEANS, so a manual item and a synced item are the same shape by
@@ -4216,7 +4252,13 @@ function itemFromFrontmatter(fm, path, basename) {
     plannedHalf: fm.planned_half === 'am' || fm.planned_half === 'pm' ? fm.planned_half : null,
     plannedOrder: Number.isFinite(Number(fm.planned_order)) ? Number(fm.planned_order) : 0,
     doneLocal: fm.done_local === true,
+    // `weekly_goal` is the key; "pinned to the week" is what it MEANS and
+    // what every surface says since 0.14.0. The key is not renamed: a
+    // plugin-written field name is a migration, a label is not.
     weeklyGoal: fm.weekly_goal === true,
+    // The note this task is for (0.14.0), as a basename. Plan-owned: no sync
+    // run reads it, writes it or clears it.
+    linkedNote: wikilinkBasename(fm.linked_note),
     // Recurrence (2026-09-04). `recurring` is three-valued on purpose: true,
     // false, or null for "unknown" (a note from before the field existed, or
     // a ClickUp task, whose API has no flag). The occurrence rule treats
@@ -4330,6 +4372,10 @@ function manualItemFrontmatter(title, id, nowIso) {
     planned_order: 0,
     weekly_goal: false,
     done_local: false,
+    // Written as null rather than left out: an ABSENT field and a null one
+    // are different things to the frontmatter parser, and a manual note must
+    // be readable by anything that reads a synced note.
+    linked_note: null,
     // Manual items are never synced, so `synced_at` would be a lie. This is
     // the manual-only field, documented in the README contract table.
     created_at: nowIso,
@@ -5722,6 +5768,281 @@ function habitsCountText(habits, folder) {
 }
 
 /* ========================================================================== *
+ * Weeks (2026-09-15)
+ *
+ * One note per ISO week at <planner folder>/Weeks/YYYY-Www.md, `type:
+ * planner-week`, with two sentinel blocks in the body. It answers the two
+ * questions nothing in the vault could answer before: what am I trying to
+ * achieve this week, and what is the one thing that would make today a win.
+ *
+ * The two words, ruled 2026-09-15:
+ *
+ *   Weekly priority - one line in this week's note, an outcome with a done
+ *                     state. Heading "## Weekly priorities", sentinel
+ *                     weekly-priorities.
+ *   Daily highlight - one sentence per day, chosen in the morning and
+ *                     confirmed in the evening. Heading "## Daily
+ *                     highlights", sentinel daily-highlights.
+ *
+ * Neither is a Goal. A Goal is the note in My Life, and that word stays
+ * there. The starred planner item is neither either: it is a task PINNED to
+ * the week, and its frontmatter key (`weekly_goal`) is unchanged because a
+ * key a plugin has already written under is a migration and a label is not.
+ *
+ * What the plugin may write in this note: the two sentinel blocks, and the
+ * `week` field when the note is created. Nothing else. Everything a person
+ * typed around the blocks comes back byte for byte, which is what
+ * upsertLogRow and toggleChecklistItem are built for. The note may equally
+ * be edited by hand or by the vault's own planner-week.py; the parser reads
+ * the shape, never who wrote it.
+ * ========================================================================== */
+
+const WEEK_TYPE = 'planner-week';
+const WEEK_PRIORITIES_SENTINEL = 'weekly-priorities';
+const WEEK_PRIORITIES_SECTION = { heading: '## Weekly priorities', schema: 'checklist' };
+const WEEK_HIGHLIGHTS_SENTINEL = 'daily-highlights';
+const WEEK_HIGHLIGHTS_SECTION = { heading: '## Daily highlights', schema: 'highlight', header: ['Date', 'Highlight', 'Done'] };
+const WEEK_ISO_RE = /^\d{4}-W\d{2}$/;
+// The marker set is the habit log's, so one vocabulary covers every check in
+// the plugin: Y done, N not done, _ or blank pending.
+const WEEK_HIGHLIGHT_MARKERS = ['Y', 'N', '_'];
+
+const p2 = (n) => String(n).padStart(2, '0');
+const DAY_MS = 86400000;
+
+// The ISO week a local day falls in, as YYYY-Www. Computed in UTC on purpose:
+// the arithmetic is whole days and a local Date crossing a DST boundary can
+// land an hour short of the next midnight.
+function isoWeekOf(dayStr) {
+  const parts = String(dayStr == null ? '' : dayStr).split('-').map(Number);
+  if (parts.length < 3 || parts.some((n) => !Number.isFinite(n))) return null;
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+  if (Number.isNaN(dt.getTime())) return null;
+  // The Thursday of this week decides which year the week belongs to.
+  dt.setUTCDate(dt.getUTCDate() - ((dt.getUTCDay() + 6) % 7) + 3);
+  const year = dt.getUTCFullYear();
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const firstThu = new Date(Date.UTC(year, 0, 4 - ((jan4.getUTCDay() + 6) % 7) + 3));
+  const week = 1 + Math.round((dt.getTime() - firstThu.getTime()) / (7 * DAY_MS));
+  return `${year}-W${p2(week)}`;
+}
+
+// The Monday of an ISO week, or null when the string is not one. A week
+// number a year does not have (2026-W53) is null rather than a silent roll
+// into January: the round trip through isoWeekOf is the check.
+function mondayOfIsoWeek(iso) {
+  const s = String(iso == null ? '' : iso).trim();
+  if (!WEEK_ISO_RE.test(s)) return null;
+  const year = Number(s.slice(0, 4));
+  const week = Number(s.slice(6));
+  if (week < 1 || week > 53) return null;
+  const jan4 = new Date(Date.UTC(year, 0, 4));
+  const mondayW1 = Date.UTC(year, 0, 4 - ((jan4.getUTCDay() + 6) % 7));
+  const d = new Date(mondayW1 + (week - 1) * 7 * DAY_MS);
+  const out = `${d.getUTCFullYear()}-${p2(d.getUTCMonth() + 1)}-${p2(d.getUTCDate())}`;
+  return isoWeekOf(out) === s ? out : null;
+}
+
+// The seven days of an ISO week, Monday first.
+function isoWeekDays(iso) {
+  const monday = mondayOfIsoWeek(iso);
+  return monday ? weekDays(monday) : [];
+}
+
+/* ---- the weekly-priorities checklist ------------------------------------- */
+
+// -> { found, schema, start, end, items: [{ line, done, text }] }
+// `start` is the sentinel's line index; `end` is where a new item goes (just
+// past the last checkbox, or just past the sentinel when there is none). The
+// block runs to the next heading, and a line inside it that is not a checkbox
+// is ignored and left exactly as it is - a person's note between two
+// priorities is not the plugin's to rewrite.
+function parseChecklistBlock(body, sentinelName) {
+  const lines = splitLogLines(body);
+  const re = logSentinelRe(sentinelName);
+  const none = { found: false, schema: null, start: -1, end: -1, items: [] };
+  let start = -1;
+  let schema = null;
+  for (let i = 0; i < lines.length; i++) {
+    const m = re.exec(lines[i]);
+    if (!m) continue;
+    start = i;
+    const sm = /schema=([A-Za-z0-9_-]+)/.exec(m[1] || '');
+    schema = sm ? sm[1] : null;
+    break;
+  }
+  if (start < 0) return none;
+  const items = [];
+  let end = start + 1;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i].replace(/\r$/, '');
+    if (/^#{1,6}\s/.test(line)) break;
+    const m = CHECKLIST_ITEM_RE.exec(line);
+    if (!m) continue;
+    items.push({ line: i, done: m[2].toLowerCase() === 'x', text: m[4] });
+    end = i + 1;
+  }
+  return { found: true, schema, start, end, items };
+}
+
+const CHECKLIST_ITEM_RE = /^(\s*(?:[-*+])\s+\[)([ xX])(\]\s+)(.*?)\s*$/;
+
+// Flips ONE box, in place, keeping the line's own bullet, indent, wording and
+// line ending. Anything else in the file comes back byte for byte.
+function toggleChecklistItem(body, sentinelName, index) {
+  const text = String(body == null ? '' : body);
+  const parsed = parseChecklistBlock(text, sentinelName);
+  const item = parsed.items[index];
+  if (!item) return text;
+  const lines = splitLogLines(text);
+  const raw = lines[item.line];
+  const eol = raw.endsWith('\r') ? '\r' : '';
+  const flipped = raw.replace(/\r$/, '').replace(CHECKLIST_ITEM_RE,
+    (_all, head, _box, tail, label) => `${head}${item.done ? ' ' : 'x'}${tail}${label}`);
+  lines[item.line] = flipped + eol;
+  return lines.join('\n');
+}
+
+// Appends one unchecked item at the end of the block, or creates the whole
+// section from `createWith` when the note has no such block yet. An empty or
+// blank text is refused (nothing is written), because a blank priority is a
+// row nobody can act on.
+function addChecklistItem(body, sentinelName, text, createWith) {
+  const base = String(body == null ? '' : body);
+  const clean = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (!clean) return base;
+  const parsed = parseChecklistBlock(base, sentinelName);
+  if (!parsed.found) {
+    if (!createWith) return base;
+    const eol = base.includes('\r\n') ? '\r' : '';
+    let head = base;
+    if (head.length && !head.endsWith('\n')) head += `${eol}\n`;
+    const section = [
+      '',
+      createWith.heading || '## Weekly priorities',
+      `<!-- ${sentinelName}: schema=${createWith.schema || 'checklist'} -->`,
+      `- [ ] ${clean}`,
+    ];
+    return head + section.join(`${eol}\n`) + `${eol}\n`;
+  }
+  const lines = splitLogLines(base);
+  const anchor = parsed.items.length ? parsed.items[parsed.items.length - 1].line : parsed.start;
+  const eol = lines[anchor] && lines[anchor].endsWith('\r') ? '\r' : '';
+  lines.splice(parsed.end, 0, `- [ ] ${clean}${eol}`);
+  return lines.join('\n');
+}
+
+/* ---- the daily-highlights table ------------------------------------------ */
+
+// One line of plain text for a table cell. A pipe would end the cell and a
+// newline would end the row, so both are removed rather than escaped: the
+// parser splits on a bare pipe, and a cell nobody can read back is worse
+// than a sentence missing one character.
+function highlightCellText(raw) {
+  return String(raw == null ? '' : raw).replace(/[|\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+// The row for a date, read out of the Date | Highlight | Done shape: the
+// generic table reader calls cell 1 the marker, and here cell 1 is the
+// sentence and cell 2 is the marker.
+function highlightRowFor(parsed, date) {
+  const row = logRowFor(parsed, date);
+  if (!row) return null;
+  return { date, text: row.marker, done: (row.rest && row.rest[0]) || '' };
+}
+
+function weekHighlights(body) {
+  const parsed = parseLogTable(body, WEEK_HIGHLIGHTS_SENTINEL);
+  return parsed.rows.filter((r) => r.date)
+    .map((r) => ({ date: r.date, text: r.marker, done: (r.rest && r.rest[0]) || '' }));
+}
+
+// The next body after the day's sentence is set. The marker is carried over
+// untouched: setting the words is not confirming the day.
+function weekHighlightAfterSet(data, date, text) {
+  const row = highlightRowFor(parseLogTable(data, WEEK_HIGHLIGHTS_SENTINEL), date);
+  return upsertLogRow(data, WEEK_HIGHLIGHTS_SENTINEL, {
+    date,
+    marker: highlightCellText(text),
+    rest: [row && row.done ? row.done : '_'],
+    createWith: WEEK_HIGHLIGHTS_SECTION,
+  });
+}
+
+// The next body after the day is marked. The sentence is carried over
+// untouched, and a day with no sentence yet is still markable (an empty
+// first cell, which the table reads back as an empty highlight).
+function weekHighlightAfterMark(data, date, marker) {
+  const m = String(marker == null ? '' : marker).trim().toUpperCase();
+  const row = highlightRowFor(parseLogTable(data, WEEK_HIGHLIGHTS_SENTINEL), date);
+  return upsertLogRow(data, WEEK_HIGHLIGHTS_SENTINEL, {
+    date,
+    marker: row ? row.text : '',
+    rest: [WEEK_HIGHLIGHT_MARKERS.includes(m) ? m : '_'],
+    createWith: WEEK_HIGHLIGHTS_SECTION,
+  });
+}
+
+/* ---- the note ------------------------------------------------------------ */
+
+function isPlannerWeekFrontmatter(fm) {
+  return !!fm && typeof fm === 'object' && String(fm.type == null ? '' : fm.type).trim() === WEEK_TYPE;
+}
+
+// The week a note describes, or null for any other note. The `week` field
+// wins; a note whose field is missing or malformed falls back to its own
+// filename, which is the ISO week by construction.
+function weekFromNote(fm, body, path) {
+  if (!isPlannerWeekFrontmatter(fm)) return null;
+  const field = String(fm.week == null ? '' : fm.week).trim();
+  const base = basenameOf(path);
+  const iso = WEEK_ISO_RE.test(field) ? field : (WEEK_ISO_RE.test(base) ? base : null);
+  if (!iso) return null;
+  const text = stripFrontmatter(body);
+  const priorities = parseChecklistBlock(text, WEEK_PRIORITIES_SENTINEL);
+  return {
+    path: path || null,
+    week: iso,
+    monday: mondayOfIsoWeek(iso),
+    priorities: priorities.items.map((i, k) => ({ index: k, done: i.done, text: i.text })),
+    doneCount: priorities.items.filter((i) => i.done).length,
+    highlights: weekHighlights(text),
+  };
+}
+
+// The note a new week starts as: the frontmatter of record, the two headings,
+// the two sentinels, and the highlights header. No rows: an empty week is an
+// empty week, and a seeded placeholder is a row nobody wrote.
+function weekTemplate(iso, nowIso) {
+  return [
+    '---',
+    `type: ${WEEK_TYPE}`,
+    `week: ${iso}`,
+    `created_at: ${nowIso || new Date().toISOString()}`,
+    'tags: []',
+    '---',
+    '',
+    `# ${iso}`,
+    '',
+    WEEK_PRIORITIES_SECTION.heading,
+    `<!-- ${WEEK_PRIORITIES_SENTINEL}: schema=${WEEK_PRIORITIES_SECTION.schema} -->`,
+    '',
+    WEEK_HIGHLIGHTS_SECTION.heading,
+    `<!-- ${WEEK_HIGHLIGHTS_SENTINEL}: schema=${WEEK_HIGHLIGHTS_SECTION.schema} -->`,
+    formatLogRow(WEEK_HIGHLIGHTS_SECTION.header),
+    formatLogRow(WEEK_HIGHLIGHTS_SECTION.header.map(() => '---')),
+    '',
+  ].join('\n');
+}
+
+// "2 of 3 done", or the empty week in words.
+function weekPriorityProgress(week) {
+  const total = week && week.priorities ? week.priorities.length : 0;
+  if (!total) return 'No priorities yet.';
+  return `${checklistProgressText(week.doneCount, total)} done`;
+}
+
+/* ========================================================================== *
  * The plugin
  * ========================================================================== */
 
@@ -5775,9 +6096,11 @@ class IcorPlannerPlugin extends Plugin {
 
     this.registerView(BOARD_VIEW_TYPE, (leaf) => new PlannerBoardView(leaf, this));
     this.registerView(TRAY_VIEW_TYPE, (leaf) => new PlannerTrayView(leaf, this));
+    this.registerView(WEEK_VIEW_TYPE, (leaf) => new PlannerWeekView(leaf, this));
 
     this.addCommand({ id: 'open-board', name: 'Open weekly planner', callback: () => this.openBoard() });
     this.addCommand({ id: 'open-tray', name: 'Open planner tray', callback: () => this.openTray(true) });
+    this.addCommand({ id: 'open-week', name: 'Open this week', callback: () => this.openWeek(isoWeekOf(todayStr())) });
     this.addCommand({ id: 'sync-now', name: 'Sync planner sources now', callback: () => this.syncNow(true) });
     this.addCommand({ id: 'add-manual-task', name: 'Add a task', callback: () => this.focusAddTask() });
     this.addCommand({ id: 'new-routine', name: 'New routine', callback: () => this.openNewRoutine() });
@@ -5846,8 +6169,11 @@ class IcorPlannerPlugin extends Plugin {
     const notify = (file) => { if (watched(file)) settle(file.path).then(() => this.emitModelChanged()); };
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       notify(file);
-      // A routine is never a planner item, so there is nothing to push for it.
-      if (inside(file) && !this.paths().isRoutine(file.path)) this.schedulePushCheck(file.path);
+      // A routine and a week note are never planner items, so there is
+      // nothing to push for either.
+      if (inside(file) && !this.paths().isRoutine(file.path) && !this.paths().isWeek(file.path)) {
+        this.schedulePushCheck(file.path);
+      }
     }));
     this.registerEvent(this.app.vault.on('delete', notify));
     this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
@@ -5983,6 +6309,11 @@ class IcorPlannerPlugin extends Plugin {
       });
       this.app.workspace.getLeavesOfType(TRAY_VIEW_TYPE).forEach((l) => {
         if (l.view instanceof PlannerTrayView) l.view.render();
+      });
+      // The week tab re-READS rather than re-renders: its model is the note's
+      // body, which nothing else in this process is holding.
+      this.app.workspace.getLeavesOfType(WEEK_VIEW_TYPE).forEach((l) => {
+        if (l.view instanceof PlannerWeekView) void l.view.refresh();
       });
       this.updateNextBadge();
     }, 250);
@@ -6322,6 +6653,9 @@ class IcorPlannerPlugin extends Plugin {
     await mk(p.routines);
     // And Habits (0.10.0): where New habit and the import put the notes.
     await mk(p.habits);
+    // And Weeks (0.14.0): one note per ISO week. The note itself is created
+    // on demand, the room is created here so it is visible from day one.
+    await mk(p.weeks);
   }
 
   async syncNow(manual) {
@@ -6766,6 +7100,7 @@ class IcorPlannerPlugin extends Plugin {
       'planned_order: 0',
       'weekly_goal: false',
       'done_local: false',
+      'linked_note: null',
       `synced_at: ${new Date().toISOString()}`,
       '---',
       '',
@@ -6781,6 +7116,14 @@ class IcorPlannerPlugin extends Plugin {
 
   // Applies the merge result: `finals` carries the settled two-way fields
   // (due / priority / description); source-owned metadata always pulls.
+  //
+  // Every write below names its field. PLAN_OWNED_ITEM_FIELDS are not among
+  // them and never will be: `planned_day`, `planned_half`, `planned_order`,
+  // `done_local`, `weekly_goal` and `linked_note` are the planner's half of
+  // the note, and processFrontMatter leaves a field nobody assigns exactly as
+  // it was. The `ops` block below is the one exception and it is the plan
+  // acting on itself (a finished occurrence clearing its own placement),
+  // never the source reaching in.
   // `plan` (optional) is the syncCompletionPlan result: the occurrence
   // advance and the reopen confirmation are applied to the note here, in the
   // same frontmatter write as the source pull.
@@ -6914,6 +7257,105 @@ class IcorPlannerPlugin extends Plugin {
     await this.app.fileManager.processFrontMatter(file, (fm) => {
       fm.weekly_goal = fm.weekly_goal !== true;
     });
+  }
+
+  // The note this task is FOR (0.14.0). Plan-owned: written only here and
+  // from a hand edit, never by a sync run. An empty value clears the field
+  // rather than writing an empty string, so "no link" reads the same as it
+  // does on a note that never had one. The linked note itself is never
+  // touched; the pointer lives on the planner side only.
+  async setItemLinkedNote(path, raw) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return null;
+    const value = normalizeLinkedNote(raw);
+    await this.app.fileManager.processFrontMatter(file, (fm) => {
+      if (value) fm.linked_note = value;
+      else delete fm.linked_note;
+    });
+    return value;
+  }
+
+  /* ---- weeks (0.14.0): the week note's two blocks ------------------------ */
+
+  // Every week write starts here: the boundary first, the lookup second, the
+  // same shape habitFile has. A path outside <root>/Weeks/ is refused before
+  // any file is looked up.
+  weekFile(iso) {
+    if (!WEEK_ISO_RE.test(String(iso == null ? '' : iso).trim())) throw new Error('not an ISO week');
+    const path = normalizePath(this.paths().weekNote(iso));
+    if (!this.paths().isWeek(path)) throw new Error('week note outside the planner Weeks folder');
+    const file = this.app.vault.getAbstractFileByPath(path);
+    return file instanceof TFile ? file : null;
+  }
+
+  // This week's note, created from the template when it is missing. Creation
+  // is the ONE write that touches anything outside the two sentinel blocks,
+  // and it only ever writes a file that did not exist: a note already there
+  // is returned as it is, never overwritten.
+  async ensureWeekNote(iso) {
+    const existing = this.weekFile(iso);
+    if (existing) return existing;
+    const folder = normalizePath(this.paths().weeks);
+    if (!this.app.vault.getAbstractFileByPath(folder)) {
+      try { await this.app.vault.createFolder(folder); } catch { /* a race with another writer */ }
+    }
+    const path = normalizePath(this.paths().weekNote(iso));
+    try {
+      await this.app.vault.create(path, weekTemplate(iso, new Date().toISOString()));
+    } catch { /* a race with another writer - the lookup below settles it */ }
+    return this.weekFile(iso);
+  }
+
+  // The week as it is on disk, or null when the note does not exist yet.
+  // Read through the metadata cache for the frontmatter and the vault for
+  // the body, the same pair habitFromFrontmatter is fed.
+  async readWeek(iso) {
+    const file = this.weekFile(iso);
+    if (!file) return null;
+    const cache = this.app.metadataCache.getFileCache(file);
+    const body = await this.app.vault.read(file);
+    return weekFromNote(cache && cache.frontmatter, body, file.path);
+  }
+
+  // Every body write runs inside vault.process on the bytes on disk, so two
+  // fast taps cannot clobber each other, and every one of them is a pure
+  // function of those bytes.
+  async writeWeekBody(iso, fn) {
+    const file = await this.ensureWeekNote(iso);
+    if (!file) throw new Error('the week note could not be created');
+    await this.app.vault.process(file, (data) => fn(data));
+    // The week tab re-reads on this signal (emitModelChanged), which is also
+    // what carries a hand edit in another pane back into the tab.
+    this.emitModelChanged();
+    return file;
+  }
+
+  async togglePriority(iso, index) {
+    await this.writeWeekBody(iso, (data) => toggleChecklistItem(data, WEEK_PRIORITIES_SENTINEL, index));
+  }
+
+  async addPriority(iso, text) {
+    const clean = String(text == null ? '' : text).trim();
+    if (!clean) return;
+    await this.writeWeekBody(iso, (data) =>
+      addChecklistItem(data, WEEK_PRIORITIES_SENTINEL, clean, WEEK_PRIORITIES_SECTION));
+  }
+
+  async setHighlight(iso, date, text) {
+    await this.writeWeekBody(iso, (data) => weekHighlightAfterSet(data, date, text));
+  }
+
+  async markHighlight(iso, date, marker) {
+    await this.writeWeekBody(iso, (data) => weekHighlightAfterMark(data, date, marker));
+  }
+
+  // The week tab, on the week containing `day` (today by default).
+  async openWeek(iso) {
+    const week = WEEK_ISO_RE.test(String(iso == null ? '' : iso).trim()) ? iso : isoWeekOf(todayStr());
+    const existing = this.app.workspace.getLeavesOfType(WEEK_VIEW_TYPE);
+    const leaf = existing.length ? existing[0] : this.app.workspace.getLeaf('tab');
+    await leaf.setViewState({ type: WEEK_VIEW_TYPE, active: true, state: { week } });
+    this.app.workspace.revealLeaf(leaf);
   }
 
   /* ---- routines (2026-09-04): the body write path ------------------------- */
@@ -7407,7 +7849,10 @@ function cardChips(item, today, ghost) {
     });
   }
   if (item.priority <= 2) out.push({ kind: 'priority', cls: `iplan-chip iplan-prio-${item.priority}`, text: `P${item.priority}` });
-  if (item.weeklyGoal) out.push({ kind: 'goal', cls: 'iplan-chip iplan-goal-chip', text: 'GOAL' });
+  // The chip says WEEK, not GOAL (ruling 2026-09-15): the star pins a task
+  // to the week, and the word "goal" belongs to the My Life note. `kind` and
+  // the CSS class keep their names - they are keys, not labels.
+  if (item.weeklyGoal) out.push({ kind: 'goal', cls: 'iplan-chip iplan-goal-chip', text: 'WEEK' });
   if (item.recurring === true) {
     out.push({
       kind: 'repeat', cls: 'iplan-chip iplan-repeat-chip', text: '', icon: 'repeat',
@@ -7769,8 +8214,20 @@ function showCardMenu(plugin, item, view, pos) {
   const menu = new Menu();
   menu.addItem((mi) => mi.setTitle(isDone(item) ? 'Reopen' : 'Mark done')
     .setIcon('check').onClick(() => plugin.toggleDoneLocal(item.path)));
-  menu.addItem((mi) => mi.setTitle(item.weeklyGoal ? 'Unmark weekly goal' : 'Mark as weekly goal')
+  menu.addItem((mi) => mi.setTitle(item.weeklyGoal ? 'Unpin from this week' : 'Pin to this week')
     .setIcon('star').onClick(() => plugin.toggleWeeklyGoal(item.path)));
+  // The note this task is for: plan-owned, and the only place it is edited
+  // from. Two rows, never one that changes meaning with the state.
+  menu.addItem((mi) => mi.setTitle(item.linkedNote ? 'Change the linked note' : 'Link a note')
+    .setIcon('link').onClick(() => new LinkNoteModal(plugin.app, plugin, item).open()));
+  if (item.linkedNote) {
+    menu.addItem((mi) => mi.setTitle(`Open ${item.linkedNote}`)
+      .setIcon('file-symlink').onClick(() => {
+        const file = plugin.app.metadataCache.getFirstLinkpathDest(item.linkedNote, item.path);
+        if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
+        else new Notice(`No note named ${item.linkedNote} in this vault.`);
+      }));
+  }
   menu.addItem((mi) => mi.setTitle('Plan on...')
     .setIcon('calendar').onClick(() => showPlanMenu(plugin, item, view, pos)));
   if (item.plannedDay) {
@@ -8508,6 +8965,10 @@ class PlannerBoardView extends ItemView {
       mkNavBtn('chevron-right', 'Next week', () => this.setWeek(addDays(this.weekStart, 7)));
       nav.createSpan({ cls: 'iplan-week-label', text: fmtWeekLabel(this.weekStart) });
     }
+    // The week note of whatever week is on screen: the priorities and the
+    // daily highlights of that week, one click from the board it plans.
+    mkNavBtn('list-checks', 'Open the week note',
+      () => this.plugin.openWeek(isoWeekOf(isDay ? this.day : this.weekStart)));
     const syncBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-sync-btn', attr: { 'aria-label': 'Sync now' } });
     setIcon(syncBtn, 'refresh-cw');
     if (this.plugin.syncing) syncBtn.addClass('is-syncing');
@@ -8736,7 +9197,7 @@ class PlannerBoardView extends ItemView {
 
 /* ========================================================================== *
  * Tray view - the right-panel companion, tabbed since 0.6.0:
- *   TASKS  - weekly goals pinned + unscheduled items by source (the classic
+ *   TASKS  - the week's pinned tasks + unscheduled items by source (the classic
  *            tray; whole-panel drop unassigns). Internal id 'sync' (pre-0.6.1
  *            name, kept so no state migration is needed). Since 0.6.1 this
  *            tab ONLY exists while the planner board is the context
@@ -8749,7 +9210,8 @@ class PlannerBoardView extends ItemView {
  *            month, its status and a menu (rename, pause, archive, delete,
  *            open); New habit and Import from My Life on the section head.
  *            Board context only, like TASKS.
- *   GOALS  - only the weekly-goals list.
+ *   PINNED - only the tasks pinned to this week (tab id 'goals', label
+ *            PINNED, section head PINNED THIS WEEK).
  * Default follows context (trayDefaultTab): board active -> TASKS, any other
  * main-area page -> AGENDA. A manual pick sticks until the context flips.
  * ========================================================================== */
@@ -8760,13 +9222,13 @@ const BOARD_ONLY_TABS = ['sync', 'habits'];
 
 // Tom's default rule: with the planner board active the tray assists planning
 // (SYNC); on every other page it answers "what is planned today" (AGENDA).
-// GOALS is never a default anywhere.
+// PINNED is never a default anywhere.
 function trayDefaultTab(contextIsBoard) {
   return contextIsBoard ? 'sync' : 'agenda';
 }
 
 // 0.6.1, Tom's rule: "your tasks" (the TASKS tab) should only show on the
-// planner page; on all other pages only AGENDA and GOALS exist. Pure helper
+// planner page; on all other pages only AGENDA and PINNED exist. Pure helper
 // so render() and setTab() share one source of truth.
 function trayVisibleTabs(contextIsBoard) {
   return contextIsBoard ? TRAY_TABS : TRAY_TABS.filter((t) => !BOARD_ONLY_TABS.includes(t));
@@ -8776,8 +9238,17 @@ function trayVisibleTabs(contextIsBoard) {
 // this panel "your tasks"); the id stays 'sync' so nothing persisted or
 // wired to it needs a migration.
 function trayTabLabel(tab) {
-  return tab === 'sync' ? 'TASKS' : tab.toUpperCase();
+  if (tab === 'sync') return 'TASKS';
+  // 'goals' renders as PINNED since 0.14.0: the tab lists tasks pinned to the
+  // week, and "Goal" is the My Life note's word (ruling 2026-09-15). The id
+  // stays 'goals' so nothing persisted or wired to it needs a migration, the
+  // same reason 'sync' still renders as TASKS.
+  if (tab === 'goals') return 'PINNED';
+  return tab.toUpperCase();
 }
+
+// The tray section head, and the whole surface's name for the starred task.
+const PINNED_SECTION_HEAD = 'PINNED THIS WEEK';
 // The spoken name of a tab (the label is uppercase for the eye only).
 function trayTabName(tab) {
   const l = trayTabLabel(tab);
@@ -8849,7 +9320,7 @@ function trayEmptyState(source, configured, status, count, total, secretsElsewhe
   // under a source head is the UNSCHEDULED list, so its empty copy states
   // that ("nothing unscheduled", the same vocabulary as the synced sections)
   // and never where the items went - a done-but-unscheduled item and a pinned
-  // weekly goal both empty this list without being on the board.
+  // pinned to the week both empty this list without being on the board.
   if (source === MANUAL_SOURCE) {
     if (count > 0) return null;
     const everAdded = (total || 0) > 0;
@@ -8976,7 +9447,7 @@ class PlannerTrayView extends ItemView {
     // Whole-panel unassign drop target, wired ONCE on the persistent
     // contentEl (empty() clears children, not the element's own listeners -
     // wiring inside render() stacked a duplicate set per re-render). Guarded
-    // to the SYNC tab: AGENDA and GOALS are read-plus-click surfaces.
+    // to the SYNC tab: AGENDA and PINNED are read-plus-click surfaces.
     const el = this.contentEl;
     el.addEventListener('dragover', (e) => {
       if (this.activeTab !== 'sync') return;
@@ -9343,14 +9814,14 @@ class PlannerTrayView extends ItemView {
     }
   }
 
-  /* ---- GOALS: only the weekly-goals list ---- */
+  /* ---- PINNED: only the tasks pinned to this week ---- */
   renderGoals(el, items) {
     const goals = items.filter((i) => i.weeklyGoal && !isDone(i));
     const sec = el.createDiv({ cls: 'iplan-tray-section' });
-    sec.createDiv({ cls: 'iplan-tray-section-head', text: 'WEEKLY GOALS' });
+    sec.createDiv({ cls: 'iplan-tray-section-head', text: PINNED_SECTION_HEAD });
     const body = sec.createDiv({ cls: 'iplan-tray-section-body' });
     if (!goals.length) {
-      body.createDiv({ cls: 'iplan-tray-note', text: 'No weekly goals yet. Mark one from a card’s menu.' });
+      body.createDiv({ cls: 'iplan-tray-note', text: 'Nothing pinned to this week yet. Pin one from a card’s menu.' });
     }
     for (const g of goals) body.appendChild(renderCard(this.plugin, g, 'tray', this));
   }
@@ -9466,11 +9937,11 @@ class PlannerTrayView extends ItemView {
       cta.addEventListener('click', () => this.plugin.openPluginSettings());
     }
 
-    /* ---- weekly goals, pinned on top of the lists ---- */
+    /* ---- the week's pinned tasks, on top of the lists ---- */
     const goals = items.filter((i) => i.weeklyGoal && !isDone(i));
     if (goals.length) {
       const sec = el.createDiv({ cls: 'iplan-tray-section' });
-      sec.createDiv({ cls: 'iplan-tray-section-head', text: 'WEEKLY GOALS' });
+      sec.createDiv({ cls: 'iplan-tray-section-head', text: PINNED_SECTION_HEAD });
       for (const g of goals) sec.appendChild(renderCard(this.plugin, g, 'tray', this));
     }
 
@@ -9538,6 +10009,293 @@ class PlannerTrayView extends ItemView {
 
     const foot = el.createDiv({ cls: 'iplan-tray-foot' });
     foot.createSpan({ text: 'DRAG A CARD ONTO THE WEEK. DROP IT BACK HERE TO UNSCHEDULE.' });
+  }
+}
+
+/* ========================================================================== *
+ * Link a note - the one editor for an item's plan-owned `linked_note`
+ *
+ * A field, a Clear and a Save, in the shape RenameHabitModal already has. No
+ * note picker: the value is a wikilink the vault resolves the way it resolves
+ * every other one, and a name that matches nothing yet is a legitimate thing
+ * to write (the note may be made next). "Open" on the card menu is where an
+ * unresolvable name is noticed, and it says so there.
+ * ========================================================================== */
+
+class LinkNoteModal extends Modal {
+  constructor(app, plugin, item, onDone) {
+    super(app);
+    this.plugin = plugin;
+    this.item = item;
+    this.onDone = typeof onDone === 'function' ? onDone : null;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.addClass('iplan-habit-modal');
+    contentEl.addClass('iplan-settings');
+    markInkPlugin(contentEl, this.plugin.manifest.id);
+    const state = { name: this.item.linkedNote || '' };
+    let input = null;
+    const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' LINK A NOTE' });
+    contentEl.createEl('h2', { cls: 'iplan-event-modal-title', text: this.item.title });
+    new Setting(contentEl)
+      .setName('Linked note')
+      .setDesc('The note this task is for, usually a project or a key element. A name or a [[wikilink]]. Sync never changes it.')
+      .addText((t) => {
+        input = t.inputEl;
+        t.setValue(state.name).onChange((v) => { state.name = v; });
+        t.inputEl.setAttribute('aria-label', 'Linked note');
+        t.inputEl.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          e.preventDefault();
+          this.submit(state.name);
+        });
+      });
+    const error = contentEl.createDiv({ cls: 'iplan-routine-modal-error', attr: { 'aria-live': 'polite' } });
+    this.errorEl = error;
+    const actions = new Setting(contentEl);
+    actions.addButton((b) => b.setButtonText('Cancel').onClick(() => this.close()));
+    actions.addButton((b) => b.setButtonText('Clear').onClick(() => this.submit('')));
+    actions.addButton((b) => b.setButtonText('Save').setCta().onClick(() => this.submit(state.name)));
+    if (input) window.setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+  async submit(raw) {
+    try {
+      await this.plugin.setItemLinkedNote(this.item.path, raw);
+      this.close();
+      if (this.onDone) this.onDone();
+    } catch (e) {
+      if (this.errorEl) this.errorEl.setText(`Could not save: ${(e && e.message) || e}`);
+    }
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ========================================================================== *
+ * Week view - the weekly priorities and the daily highlights of one ISO week
+ *
+ * Read and edit, nothing else. Two blocks, in the order the note carries
+ * them: the priorities as a checklist whose boxes write the note, and the
+ * seven days as rows with today's editable. A day that is not today shows
+ * what it says and takes no input, which is the concept's own rule: the
+ * highlight is chosen in the morning and confirmed in the evening, of the day
+ * it belongs to. Yesterday is history, not a form.
+ *
+ * The note is created on the first write, never on opening the tab: a week
+ * nobody planned should leave no file behind.
+ * ========================================================================== */
+
+class PlannerWeekView extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.week = isoWeekOf(todayStr());
+    this.model = null;
+    this.adding = false;
+    this.draft = '';
+    this.highlightDraft = null;
+  }
+
+  getViewType() { return WEEK_VIEW_TYPE; }
+  getDisplayText() { return 'Planner week'; }
+  getIcon() { return 'list-checks'; }
+
+  getState() { return { week: this.week }; }
+  async setState(state, result) {
+    if (state && WEEK_ISO_RE.test(String(state.week || ''))) {
+      this.week = state.week;
+      await this.refresh();
+    }
+    return super.setState(state, result);
+  }
+
+  async onOpen() {
+    this.contentEl.addClass('iplan-week-root');
+    markInkPlugin(this.contentEl, this.plugin.manifest.id);
+    await this.refresh();
+  }
+
+  async onClose() { this.contentEl.empty(); }
+
+  async refresh() {
+    try {
+      this.model = await this.plugin.readWeek(this.week);
+    } catch {
+      this.model = null;
+    }
+    this.render();
+  }
+
+  setWeek(iso) {
+    if (!iso) return;
+    this.week = iso;
+    this.highlightDraft = null;
+    this.adding = false;
+    void this.refresh();
+  }
+
+  render() {
+    const el = this.contentEl;
+    el.empty();
+    const today = todayStr();
+    const days = isoWeekDays(this.week);
+    const monday = days.length ? days[0] : null;
+
+    /* ---- masthead ---- */
+    const head = el.createDiv({ cls: 'iplan-masthead' });
+    const kicker = head.createDiv({ cls: 'iplan-kicker' });
+    kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
+    kicker.createSpan({ text: ' ICOR PLANNER' });
+    const titleRow = head.createDiv({ cls: 'iplan-title-row' });
+    titleRow.createEl('h1', {
+      cls: 'iplan-title',
+      text: this.week === isoWeekOf(today) ? 'This Week.' : 'The Week.',
+    });
+    const nav = titleRow.createDiv({ cls: 'iplan-nav' });
+    const mkNavBtn = (icon, label, fn) => {
+      const b = nav.createEl('button', { cls: 'iplan-nav-btn', attr: { 'aria-label': label } });
+      setIcon(b, icon);
+      b.addEventListener('click', fn);
+    };
+    mkNavBtn('chevron-left', 'Previous week', () => this.setWeek(isoWeekOf(addDays(monday || today, -7))));
+    const todayBtn = nav.createEl('button', { cls: 'iplan-nav-btn iplan-nav-today', text: 'TODAY' });
+    todayBtn.addEventListener('click', () => this.setWeek(isoWeekOf(today)));
+    mkNavBtn('chevron-right', 'Next week', () => this.setWeek(isoWeekOf(addDays(monday || today, 7))));
+    nav.createSpan({ cls: 'iplan-week-label', text: this.week });
+
+    this.renderPriorities(el);
+    this.renderHighlights(el, days, today);
+  }
+
+  /* ---- the weekly priorities ---- */
+  renderPriorities(el) {
+    const sec = el.createDiv({ cls: 'iplan-week-section' });
+    const headRow = sec.createDiv({ cls: 'iplan-tray-section-head' });
+    headRow.setText('WEEKLY PRIORITIES');
+    const items = this.model ? this.model.priorities : [];
+    sec.createDiv({
+      cls: 'iplan-week-progress',
+      text: this.model ? weekPriorityProgress(this.model) : 'No priorities yet.',
+    });
+    const body = sec.createDiv({ cls: 'iplan-week-list' });
+    for (const row of items) {
+      const line = body.createDiv({ cls: 'iplan-week-row' });
+      const box = line.createEl('input', { attr: { type: 'checkbox' } });
+      box.checked = row.done;
+      box.setAttribute('aria-label', row.text);
+      box.addEventListener('change', () => {
+        // Optimistic, then corrected by the re-read: a refused write flips
+        // the box back rather than leaving the eye and the file disagreeing.
+        box.disabled = true;
+        void this.plugin.togglePriority(this.week, row.index)
+          .catch(() => { box.checked = row.done; })
+          .finally(() => { box.disabled = false; });
+      });
+      const label = line.createSpan({ cls: 'iplan-week-row-label', text: row.text });
+      if (row.done) label.addClass('is-done');
+    }
+    if (!items.length) {
+      body.createDiv({ cls: 'iplan-tray-note', text: 'What would make this week a good one? Add up to five.' });
+    }
+    this.renderAddPriority(sec);
+  }
+
+  renderAddPriority(sec) {
+    const wrap = sec.createDiv({ cls: 'iplan-tray-add' });
+    if (!this.adding) {
+      const btn = wrap.createEl('button', {
+        cls: 'iplan-action is-quiet', attr: { type: 'button', 'aria-label': 'Add a priority' },
+      });
+      btn.createSpan({ cls: 'iplan-kicker-marker', text: '+' });
+      btn.createSpan({ text: 'ADD PRIORITY' });
+      btn.addEventListener('click', () => { this.adding = true; this.render(); });
+      return;
+    }
+    const input = wrap.createEl('input', {
+      cls: 'iplan-tray-add-input',
+      attr: { type: 'text', placeholder: 'One outcome for this week', 'aria-label': 'New weekly priority' },
+    });
+    input.value = this.draft;
+    input.addEventListener('input', () => { this.draft = input.value; });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); this.adding = false; this.draft = ''; this.render(); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const value = input.value.trim();
+      if (!value) return;
+      input.value = '';
+      this.draft = '';
+      void this.plugin.addPriority(this.week, value);
+    });
+    window.setTimeout(() => input.focus(), 0);
+  }
+
+  /* ---- the daily highlights ---- */
+  renderHighlights(el, days, today) {
+    const sec = el.createDiv({ cls: 'iplan-week-section' });
+    sec.createDiv({ cls: 'iplan-tray-section-head', text: 'DAILY HIGHLIGHTS' });
+    const rows = new Map();
+    for (const h of (this.model ? this.model.highlights : [])) rows.set(h.date, h);
+    const body = sec.createDiv({ cls: 'iplan-week-list' });
+    for (const day of days) {
+      const row = rows.get(day) || { date: day, text: '', done: '' };
+      const line = body.createDiv({ cls: 'iplan-week-row' });
+      if (day === today) line.addClass('is-today');
+      line.createSpan({ cls: 'iplan-week-day', text: fmtDayLabel(day) });
+      if (day === today) this.renderTodayHighlight(line, row);
+      else this.renderPastHighlight(line, row);
+    }
+  }
+
+  renderPastHighlight(line, row) {
+    const label = line.createSpan({
+      cls: 'iplan-week-row-label',
+      text: row.text || 'Nothing recorded.',
+    });
+    if (!row.text) label.addClass('is-empty');
+    const state = markerState(row.done);
+    if (row.text) line.createSpan({ cls: `iplan-chip iplan-week-${state}`, text: state.toUpperCase() });
+  }
+
+  renderTodayHighlight(line, row) {
+    const input = line.createEl('input', {
+      cls: 'iplan-tray-add-input',
+      attr: {
+        type: 'text',
+        placeholder: 'The one thing that makes today a win',
+        'aria-label': "Today's highlight",
+      },
+    });
+    input.value = this.highlightDraft == null ? row.text : this.highlightDraft;
+    input.addEventListener('input', () => { this.highlightDraft = input.value; });
+    const commit = () => {
+      const value = input.value.trim();
+      if (value === row.text) { this.highlightDraft = null; return; }
+      this.highlightDraft = null;
+      void this.plugin.setHighlight(this.week, row.date, value);
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); this.highlightDraft = null; this.render(); return; }
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      commit();
+    });
+    const state = markerState(row.done);
+    const mark = (marker, label) => {
+      const b = line.createEl('button', { cls: 'iplan-seg-btn', text: label, attr: { type: 'button' } });
+      if (markerState(marker) === state) b.addClass('is-active');
+      b.setAttribute('aria-pressed', markerState(marker) === state ? 'true' : 'false');
+      b.addEventListener('click', () => {
+        this.highlightDraft = null;
+        void this.plugin.markHighlight(this.week, row.date, marker);
+      });
+    };
+    mark('Y', 'DONE');
+    mark('N', 'NOT DONE');
+    mark('_', 'PENDING');
   }
 }
 
@@ -10394,6 +11152,15 @@ module.exports.__test = {
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
   checklistModel, checklistProgressText, parseLogTable, logRowFor, upsertLogRow, removeLogRow, markerState,
+  // weeks (0.14.0): the weekly priorities and the daily highlights
+  WEEK_TYPE, WEEK_VIEW_TYPE, WEEK_ISO_RE, WEEK_HIGHLIGHT_MARKERS,
+  WEEK_PRIORITIES_SENTINEL, WEEK_PRIORITIES_SECTION, WEEK_HIGHLIGHTS_SENTINEL, WEEK_HIGHLIGHTS_SECTION,
+  isoWeekOf, mondayOfIsoWeek, isoWeekDays,
+  parseChecklistBlock, toggleChecklistItem, addChecklistItem,
+  highlightCellText, highlightRowFor, weekHighlights, weekHighlightAfterSet, weekHighlightAfterMark,
+  isPlannerWeekFrontmatter, weekFromNote, weekTemplate, weekPriorityProgress,
+  // the plan-owned half of a planner item (0.14.0)
+  PLAN_OWNED_ITEM_FIELDS, normalizeLinkedNote, PINNED_SECTION_HEAD,
   ROUTINE_TYPE, ROUTINE_TYPES, ROUTINE_LOG_SENTINEL, ROUTINE_LOG_SECTION, WEEKDAY_CODES, LANE_KIND_RANK,
   dayCode, normalizeWeekdays, routineTypeOf, normalizeHM, routineDefaultsOf, routineWeekdaysDefaultOf,
   routineSteps, parseRoutineNote, routineRowState, routineHalf, routineOccurrence, routineOccurrences,

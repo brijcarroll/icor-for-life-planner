@@ -311,8 +311,12 @@ test('SOURCE: the card is not draggable, the drop line counts it as a position, 
   assert.ok(/renderChecklist\(card, model/.test(card), 'the steps are the shared checklist');
   // the drop-line selector treats a routine block as a position, ghost or not
   assert.ok(/querySelectorAll\('\.iplan-event, \.iplan-card\.iplan-routine, \.iplan-card:not\(\.is-dragging\):not\(\.is-ghost\)'\)/.test(main), 'main must match /querySelectorAll\(\'\.iplan-event, \.iplan-card\.iplan-routine, \.iplan-card:not\(\.is-dragging\):not\(\.is-ghost\)\'\)/');
-  // the push check is never scheduled for a routine note
-  assert.ok(/if \(inside\(file\) && !this\.paths\(\)\.isRoutine\(file\.path\)\) this\.schedulePushCheck\(file\.path\);/.test(main), 'main must match /if \(inside\(file\) && !this\.paths\(\)\.isRoutine\(file\.path\)\) this\.schedulePushCheck\(file\.path\);/');
+  // the push check is never scheduled for a routine note. The guard gained a
+  // second clause in 0.14.0 (a week note is not a planner item either), so the
+  // assertion reads the routine half of it rather than the whole line.
+  assert.ok(/inside\(file\) && !this\.paths\(\)\.isRoutine\(file\.path\)/.test(main),
+    'the push check must still be guarded by isRoutine');
+  assert.ok(/this\.schedulePushCheck\(file\.path\);/.test(main), 'the push check is still scheduled');
   // every log write runs inside vault.process
   assert.ok(/await this\.app\.vault\.process\(file, fn\);/.test(main), 'main must match /await this\.app\.vault\.process\(file, fn\);/');
   for (const name of ['toggleRoutineStep', 'skipRoutine', 'unskipRoutine', 'resetRoutineDay']) {

@@ -203,7 +203,8 @@ test('the stylesheet carries the strip on the token aliases and no raw hex, and 
   assert.match(block, /\.iplan-next-strip\.is-urgent \.iplan-next-strip-count \{ color: var\(--iplan-marker\)/,
     'the marker is state ink on the countdown only');
   assert.match(block, /text-overflow: ellipsis/);
-  assert.match(css, /\.iplan-next-strip, \.iplan-root, \.iplan-tray-root, \.iplan-settings \{/,
+  const aliasBlock = css.slice(0, css.indexOf('{', css.indexOf('--iplan-marker:') - 400) + 1);
+  assert.ok(aliasBlock.includes('.iplan-next-strip'),
     'the strip must be in the alias block or every --iplan-* it names is unset');
   assert.doesNotMatch(css, /iplan-next-badge/, 'the ribbon badge rules are still shipped');
 });

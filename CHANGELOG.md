@@ -6,6 +6,42 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.14.0] - 2026-09-15
+
+> Pending Flint review. Not released until he has read the new view
+> registration, the manifest and the note the plugin now creates.
+
+### Added
+- **The week note, and a tab that reads and writes it.** Beside the board
+  there is now one note per week in `02 Planner/Weeks/`, holding the two
+  things the board could never answer: what you are trying to achieve this
+  week, and what would make today a win. Open it from the board, from the
+  command palette, or by opening the note itself; it is plain markdown with
+  two headings, so writing in it by hand works exactly as well.
+- **Weekly priorities.** One line per outcome with a box you tick. Ticking it
+  in the tab writes the box in the note, and ticking it in the note shows up
+  in the tab. Not tasks: outcomes. A task can serve one.
+- **Daily highlights.** One sentence per day, set in the morning and
+  confirmed in the evening as done, not done, or left pending. Only today's
+  row takes input; the rest of the week shows what it already says, because
+  the highlight belongs to the day it was chosen on.
+- **The week note is created the first time you put something in it**, and
+  never before. A week nobody planned leaves no file behind, and a note
+  already there is never overwritten.
+- **Link a task to the note it is for.** A card's menu can point a task at a
+  project, a key element, or any other note, and open it from the same menu.
+  The link lives on the planner side only: nothing is written into the note
+  you point at, and no sync run ever changes it, the same way your day
+  placement and your pins have always survived a sync.
+
+### Changed
+- **A starred task is now "pinned to this week", not a "weekly goal".** The
+  tray section reads PINNED THIS WEEK, the tab reads PINNED, the chip on the
+  card reads WEEK, and the card menu offers to pin and unpin. Nothing about
+  what the star does has changed, and nothing in your notes changed: the
+  field in the file keeps its name. The word "goal" now means one thing in
+  the suite, the goal note in your own vault.
+
 ## [0.13.0] - 2026-09-15
 
 ### Fixed

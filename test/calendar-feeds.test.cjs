@@ -314,7 +314,14 @@ test('design contract: no new hex, colour on the edge only, time and TZ mark in 
   assert.ok(!/--iplan-marker/.test(eventBlock), 'the marker has left the event chip');
   // The picker is the run-1 segmented control with the lens as an edge, and
   // the settings tab can resolve the tokens it names.
-  assert.match(css, /\.iplan-root, \.iplan-tray-root, \.iplan-settings \{/, 'the token block reaches the settings tab');
+  // Read as a SET, not as a fixed list: the block gains a root whenever the
+  // plugin gains a surface (the week view did, in 0.14.0), and a gate that
+  // pins the whole selector goes red on the addition rather than on the
+  // omission it exists to catch.
+  const aliasBlock = css.slice(0, css.indexOf('{', css.indexOf('--iplan-marker:') - 400) + 1);
+  for (const root of ['.iplan-root', '.iplan-tray-root', '.iplan-settings']) {
+    assert.ok(aliasBlock.includes(root), `the token block must reach ${root}`);
+  }
   for (let n = 1; n <= 4; n++) assert.match(css, new RegExp(`\\.iplan-settings-swatches button\\.iplan-swatch-${n} \\{ border-left-color: var\\(--iplan-cal-${n}\\); \\}`));
   const c = code();
   assert.match(c, /containerEl\.addClass\('iplan-settings'\)/);
