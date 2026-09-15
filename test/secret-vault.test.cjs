@@ -317,8 +317,16 @@ test('THE GATE: the only keychain in shipped text is Obsidian\'s own, never the 
   }
   assert.deepEqual(hits, [], `a keychain that is not Obsidian's:\n${hits.join('\n')}`);
   assert.ok(/Obsidian\\?'s keychain \(Settings, General, Keychain\)/.test(shipped[0][1]), 'main.js points the member at the section by its path');
-  // And the accurate sentence is what the member reads.
-  for (const [name, text] of shipped.slice(1, 3)) assert.match(text, /outside the vault and outside `data\.json`/, `${name} says where the secrets are`);
+  // And the accurate sentence is what the member reads. Retuned 2026-09-15:
+  // the README rewrite of 2026-09-11 (edb88be) compressed the long form into
+  // one sentence for the member, so the two files are read for the sentence
+  // each of them actually carries. Both are still positive assertions, and
+  // both still say the same true thing: the keychain is Obsidian's, and the
+  // keys are not in the notes.
+  assert.match(shipped[1][1], /Keys are held in Obsidian's own keychain, outside your notes\./,
+    'README.md says where the secrets are');
+  assert.match(shipped[2][1], /outside the vault and outside `data\.json`/,
+    'SECURITY.md says where the secrets are, in full');
 });
 
 test('secret-free after migration: the settings on disk and the cache note carry no secret', () => {

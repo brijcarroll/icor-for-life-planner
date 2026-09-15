@@ -208,9 +208,17 @@ test('the stylesheet carries the strip on the token aliases and no raw hex, and 
   assert.doesNotMatch(css, /iplan-next-badge/, 'the ribbon badge rules are still shipped');
 });
 
-test('the member-facing words match: README bullet and the settings row', () => {
-  assert.match(readme, /A strip above the sidebar logo shows your next event with a live\n\s+countdown/);
-  assert.doesNotMatch(readme, /below the left ribbon/);
+test('the member-facing words match: the settings row places the strip above the sidebar logo, and no shipped text puts it back under the ribbon', () => {
+  /* Retuned 2026-09-15 for the README rewrite of 2026-09-11 (edb88be), which
+   * took the mechanics out of the README. The settings row is now the only
+   * member-facing text that says where the strip sits, so that is what this
+   * gate reads; the README keeps the negative it always had, because the
+   * defect worth catching is a shipped sentence putting the strip back where
+   * it was before 0.9.1. */
   assert.match(main, /\.setName\('Next event strip'\)/);
+  assert.match(main, /A strip across the top of the left sidebar, above the logo, shows what is next/,
+    'the settings row places the strip');
+  assert.doesNotMatch(readme, /below the left ribbon/);
+  assert.doesNotMatch(readme, /ribbon badge/i, 'the strip left the ribbon in 0.9.1');
   assert.doesNotMatch(main, /desktop only\)/, 'the settings row still says desktop only');
 });

@@ -104,9 +104,19 @@ test('the button has the same class shape as its siblings, so the theme styles i
   assert.match(main, /e\.key !== 'Enter' && e\.key !== ' '/, 'a div that acts as a button must take Enter and Space');
 });
 
-test('the member-facing words match: the README names the toolbar button and the ribbon, not a file-tree entry', () => {
-  assert.doesNotMatch(readme, /"Planner" entry in the file tree/);
-  assert.match(readme, /A Planner button on the file-tree toolbar under the sidebar logo, and\n\s+one in the left ribbon, open the weekly board/);
-  assert.match(readme, /The planner folder itself opens like any folder\./);
-  assert.match(readme, /Click the Planner button on the file-tree toolbar or in the left\n\s+ribbon/);
+test('the member-facing words match: the README sends the member to an entry point that exists, and never to a file-tree entry', () => {
+  /* Retuned 2026-09-15 for the README rewrite of 2026-09-11 (edb88be). The
+   * README no longer walks through both entry points and the planner folder;
+   * it names the one a new member should use. The defect this test was
+   * written for is unchanged and still gated: the README must not send
+   * anyone to a "Planner" entry in the file tree, in any spelling, because
+   * there has not been one since 0.9.2. What the README does name must be
+   * real, so the runtime is read for both entry points here. */
+  assert.doesNotMatch(readme, /entry in the file tree/i, 'there is no file-tree entry to send anyone to');
+  assert.doesNotMatch(readme, /"Planner" entry/);
+  assert.match(readme, /Open the Planner from the button under\n\s*the sidebar logo/,
+    'the README names the toolbar button');
+  assert.match(main, /this\.addRibbonIcon\(PLANNER_TOOLBAR_ICON, PLANNER_TOOLBAR_LABEL/,
+    'and the second entry point the README leaves unnamed is still mounted');
+  assert.match(main, /mountPlannerToolbarButton\(\)/, 'as is the one it does name');
 });

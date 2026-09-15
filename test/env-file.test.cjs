@@ -508,15 +508,30 @@ test('source scan: nothing in the layer logs, and no Notice carries a value', ()
 
 test('the shipped files: README section, CHANGELOG line, the three version files agree', () => {
   const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
-  const section = readme.slice(readme.indexOf('## Where your keys live'));
+  const section = readme.slice(readme.indexOf('## Where your keys live'), readme.indexOf('## What it touches'));
   assert.ok(section.length > 0, 'README has a "Where your keys live" section');
-  for (const key of ['TODOIST_TOKEN', 'CLICKUP_TOKEN', 'IMAP_PASSWORD', 'OUTLOOK_REFRESH_TOKEN', 'OUTLOOK_ACCESS_TOKEN', 'OUTLOOK_EXPIRES_AT', 'OUTLOOK_ACCOUNT', 'PLANNER_CALENDAR_']) {
-    assert.ok(section.includes(`\`${key}`), `README names ${key}`);
-  }
-  assert.match(section, /secretsBackend/);
-  assert.match(section, /envFilePath/);
-  assert.match(readme, /An account is required/i, 'the account disclosure');
-  assert.match(readme, /## Network use \(disclosure\)/, 'the network disclosure');
+  /* Retuned 2026-09-15 for the README rewrite of 2026-09-11 (edb88be), which
+   * took the env-var names, the setting ids and the two disclosure headings
+   * out of the README on purpose: the names are the repo, not the product,
+   * and the disclosure was compressed into "What it touches" rather than
+   * dropped. So this gate did not lose its subject, it moved to the
+   * sentences that replaced them. The key names themselves are still gated
+   * against the layer that owns them by the key-list test above, which is
+   * where a wrong name would actually break a member. */
+  assert.match(section, /One setting decides whether your keys stay on this device or follow the vault/,
+    'the README still says the choice exists');
+  assert.match(section, /to every device you sync\./, 'and what the other option means');
+  assert.match(section, /Keys are held in Obsidian's own keychain, outside your notes\./,
+    'and where they are unless you choose otherwise');
+  const touches = readme.slice(readme.indexOf('## What it touches'), readme.indexOf('## Good to know'));
+  assert.ok(touches.length > 0, 'README has a "What it touches" section');
+  assert.match(touches, /\*\*Your vault\.\*\*/, 'the disclosure: what it writes into the vault');
+  assert.match(touches, /\*\*The services you connect, and only those\.\*\*/, 'the network disclosure');
+  assert.match(touches, /Nothing passes through myICOR/, 'and that no traffic goes through us');
+  assert.match(touches, /\*\*It reads by default\.\*\*/, 'the write-back disclosure');
+  assert.match(touches, /each sits behind its own\n\s*switch that is off until you turn it on/,
+    'and that both write-backs are off until the member turns them on');
+  assert.match(readme, /You do not need an account to start\./, 'the account disclosure');
   const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
