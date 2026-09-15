@@ -22,7 +22,12 @@
  *     feed URL or its private key.
  *   - reconcile semantics: a task absent from a source's FULL open set on a
  *     healthy fetch is genuinely done -> status: done. On a failed fetch the
- *     files stay untouched (never prune on a blip).
+ *     files stay untouched (never prune on a blip), and since 0.13.0 a
+ *     healthy fetch that read only PART of the open set (a page walk stopped
+ *     at its cap, a mailbox with more stars than the read takes, a filter
+ *     narrowed since the last sync) carries complete:false and reconciles
+ *     nothing either: the upserts still run, so the board stays live, but
+ *     absence from a window is never read as a completion.
  */
 'use strict';
 
@@ -1625,10 +1630,27 @@ function degraded(source, reason, message, hint, docUrl) {
   if (docUrl) out.docUrl = docUrl;
   return out;
 }
-function okResult(source, items, warning) {
+// `complete` is the third state a HEALTHY result needs. A page walk that
+// stopped at its own cap, and a mailbox read that took only the newest N of a
+// larger flagged set, both return real items and no error, and the open set
+// they return is still a WINDOW rather than the whole truth. Reconcile reads
+// this flag: absence from an incomplete set proves nothing, so nothing is
+// marked done from it. It is deliberately NOT `degraded`, because a degraded
+// source skips the upsert altogether and would freeze a member's board for
+// good the moment their account passed the ceiling.
+function okResult(source, items, warning, complete = true) {
   const out = { ok: true, source, items };
   if (warning) out.warning = warning;
+  if (complete === false) out.complete = false;
   return out;
+}
+
+// The line an incomplete walk shows on the board. It reports what WAS read,
+// never a guess at what was missed: the cap is the exact point at which the
+// connector stopped counting, so the remainder is unknown, not estimable.
+function truncatedWarning(read) {
+  const n = Number(read) || 0;
+  return `sync incomplete, stopped after ${n} item${n === 1 ? '' : 's'} with more still open, so nothing was marked done.`;
 }
 
 /* ========================================================================== *
@@ -1674,16 +1696,17 @@ function todoistPriorityRank(apiPriority) {
   return clampPriorityRank(5 - apiPriority);
 }
 
-async function todoistFetchOpen(settings) {
+async function todoistFetchOpen(settings, deps) {
   const token = (settings.todoistToken || '').trim();
   if (!token) return degraded('todoist', 'no-token', 'Todoist is not connected (no token).');
+  const rq = requestUrlOf(deps);
   const base = 'https://api.todoist.com/api/v1';
   const items = [];
   let cursor = null;
   try {
     for (let page = 0; page < 20; page++) {
       const url = `${base}/tasks?limit=200${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-      const res = await requestUrl({
+      const res = await rq({
         url, method: 'GET', throw: false,
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -1719,7 +1742,12 @@ async function todoistFetchOpen(settings) {
       cursor = body.next_cursor || null;
       if (!cursor) break;
     }
-    return okResult('todoist', items);
+    // The loop only ever leaves `cursor` set by running out of pages: every
+    // other exit clears it first. A cursor still in hand is Todoist saying
+    // there is more, and those tasks are open, not finished.
+    return cursor
+      ? okResult('todoist', items, truncatedWarning(items.length), false)
+      : okResult('todoist', items);
   } catch (e) {
     return degraded('todoist', 'unreachable', 'Todoist is unreachable.');
   }
@@ -1729,8 +1757,8 @@ async function todoistFetchOpen(settings) {
  * Connector: ClickUp (API v2, RAW token in Authorization - no Bearer prefix)
  * ========================================================================== */
 
-async function clickupApi(token, path) {
-  const res = await requestUrl({
+async function clickupApi(token, path, deps) {
+  const res = await requestUrlOf(deps)({
     url: `https://api.clickup.com/api/v2${path}`,
     method: 'GET', throw: false,
     headers: { Authorization: token },
@@ -1755,12 +1783,25 @@ function clickupQuery(settings, myId, page) {
   return qs.toString();
 }
 
-async function clickupFetchOpen(settings) {
+// The identity of that query, as one string. Everything that can shrink the
+// open set WITHOUT anything having been completed belongs in here: the
+// subtasks toggle, the pinned workspace, and the account the token resolves
+// to. It rides back on the result and is stored beside each item's shadow, so
+// a later sync asking a narrower question can tell "this task is finished"
+// from "this task is no longer being asked about".
+function clickupScopeKey(settings, myId) {
+  const s = settings || {};
+  const sub = s.clickupIncludeSubtasks === true ? '1' : '0';
+  const team = (s.clickupTeamId || '').trim() || '*';
+  return `sub=${sub}|team=${team}|me=${myId == null ? '' : String(myId)}`;
+}
+
+async function clickupFetchOpen(settings, deps) {
   const token = (settings.clickupToken || '').trim();
   if (!token) return degraded('clickup', 'no-token', 'ClickUp is not connected (no token).');
   try {
     // Who am I - assignee filter derives from the token, never hard-coded.
-    const me = await clickupApi(token, '/user');
+    const me = await clickupApi(token, '/user', deps);
     const myId = me && me.user && me.user.id;
     if (!myId) return degraded('clickup', 'misconfigured', 'ClickUp: could not derive the user from the token.');
 
@@ -1770,15 +1811,19 @@ async function clickupFetchOpen(settings) {
     if (configured) {
       teamIds = [configured];
     } else {
-      const teams = await clickupApi(token, '/team');
+      const teams = await clickupApi(token, '/team', deps);
       teamIds = ((teams && teams.teams) || []).map((t) => String(t.id));
     }
     if (!teamIds.length) return degraded('clickup', 'misconfigured', 'ClickUp: no workspace visible to this token.');
 
     const items = [];
+    let truncated = false;
     for (const teamId of teamIds) {
+      // Set only by an exit that ClickUp itself declared final. Running the
+      // page counter out is not such an exit.
+      let walked = false;
       for (let page = 0; page < 20; page++) {
-        const data = await clickupApi(token, `/team/${encodeURIComponent(teamId)}/task?${clickupQuery(settings, myId, page)}`);
+        const data = await clickupApi(token, `/team/${encodeURIComponent(teamId)}/task?${clickupQuery(settings, myId, page)}`, deps);
         const tasks = (data && data.tasks) || [];
         for (const t of tasks) {
           const st = (t.status && t.status.type || '').toLowerCase();
@@ -1803,10 +1848,15 @@ async function clickupFetchOpen(settings) {
             parentId: t.parent ? String(t.parent) : null,
           });
         }
-        if (!tasks.length || (data && data.last_page === true)) break;
+        if (!tasks.length || (data && data.last_page === true)) { walked = true; break; }
       }
+      if (!walked) truncated = true;
     }
-    return okResult('clickup', items);
+    const out = truncated
+      ? okResult('clickup', items, truncatedWarning(items.length), false)
+      : okResult('clickup', items);
+    out.scope = clickupScopeKey(settings, myId);
+    return out;
   } catch (e) {
     if (e && e.auth) return degraded('clickup', 'misconfigured', 'ClickUp rejected the token.');
     return degraded('clickup', 'unreachable', 'ClickUp is unreachable.');
@@ -2383,14 +2433,26 @@ async function outlookFetchOpen(settings, deps) {
   try {
     const items = [];
     let url = `${GRAPH_BASE}/me/messages?${outlookMessagesQuery()}`;
+    let refused = false;
     for (let page = 0; page < 10 && url; page++) {
       const data = await graphRequest(s, deps, { url });
       for (const m of Array.isArray(data.value) ? data.value : []) {
         const it = outlookItemFromMessage(m);
         if (it.id) items.push(it);
       }
-      url = graphNextLink(data['@odata.nextLink']);
+      const next = data['@odata.nextLink'];
+      url = graphNextLink(next);
+      // Graph offered a link the origin guard would not follow. Ending the
+      // walk is still right (the bearer token stays on Graph's origin), but
+      // what is left behind is a window onto the mailbox, not the mailbox.
+      if (next && !url) { refused = true; break; }
     }
+    if (refused) {
+      return okResult('outlook', items, 'sync incomplete, the next page was offered from another host and refused, so nothing was marked done.', false);
+    }
+    // Still holding a link after the last allowed page: the cap was reached
+    // and there is more flagged mail than was read.
+    if (url) return okResult('outlook', items, truncatedWarning(items.length), false);
     return okResult('outlook', items);
   } catch (e) {
     return degraded('outlook', (e && e.reason) || 'unreachable', (e && e.message) || 'Outlook is unreachable.', e && e.hint);
@@ -2980,7 +3042,10 @@ function imapItemsFromFetch(fetched, host) {
 
 // The read script: EXAMINE (read-only), UID SEARCH FLAGGED, one UID FETCH
 // of header fields only. Returns normalized task items.
-function imapFetchStarredRaw(opts, user, pass, maxItems, deps) {
+// `report` (optional) is filled with what the session learned about the set
+// as a whole, beside the items it returns: `flagged` is how many UIDs the
+// SEARCH found, which is not the same as how many the FETCH read.
+function imapFetchStarredRaw(opts, user, pass, maxItems, deps, report) {
   const steps = [
     { stage: 'examine', cmd: () => 'EXAMINE INBOX' },
     {
@@ -3001,7 +3066,10 @@ function imapFetchStarredRaw(opts, user, pass, maxItems, deps) {
       },
     },
   ];
-  return imapSession(opts, user, pass, steps, deps).then((ctx) => imapItemsFromFetch(ctx.fetched || [], opts.host));
+  return imapSession(opts, user, pass, steps, deps).then((ctx) => {
+    if (report) report.flagged = (ctx.uids || []).length;
+    return imapItemsFromFetch(ctx.fetched || [], opts.host);
+  });
 }
 
 // Classifier reason -> connector reason (the contract the UI renders).
@@ -3026,6 +3094,11 @@ function imapPreflight(opts, user, pass) {
   return null;
 }
 
+// The FETCH takes the newest `EMAIL_MAX_ITEMS` of the flagged set. A mailbox
+// with more starred mail than that loses its OLDEST stars from the open set,
+// which is precisely the mail most likely to look finished.
+const EMAIL_MAX_ITEMS = 50;
+
 async function emailFetchStarred(settings, deps) {
   const opts = imapTransportOptions(settings);
   const user = trimmed(settings.imapUser);
@@ -3033,7 +3106,12 @@ async function emailFetchStarred(settings, deps) {
   const early = imapPreflight(opts, user, pass);
   if (early) return degraded('email', imapReasonToConnector(early.reason), early.message, early.hint, early.docUrl);
   try {
-    const items = await imapFetchStarredRaw(opts, user, pass, 50, deps);
+    const report = {};
+    const items = await imapFetchStarredRaw(opts, user, pass, EMAIL_MAX_ITEMS, deps, report);
+    const flagged = Number(report.flagged) || 0;
+    if (flagged > EMAIL_MAX_ITEMS) {
+      return okResult('email', items, `sync incomplete, ${flagged} starred mails but only the newest ${EMAIL_MAX_ITEMS} were read, so nothing was marked done.`, false);
+    }
     return okResult('email', items);
   } catch (e) {
     const c = classifyImapError(e, opts.host, opts);
@@ -4265,7 +4343,7 @@ function manualItemFrontmatter(title, id, nowIso) {
 // external_id happens to look like the id of a task that just vanished from
 // Todoist. Extracted as a pure function so that invariant is a test and not a
 // comment.
-function reconcileStaleIds(source, allItems, openIds) {
+function reconcileStaleIds(source, allItems, openIds, inScope) {
   if (!isSyncedSource(source)) return [];
   const out = [];
   for (const it of allItems || []) {
@@ -4275,9 +4353,32 @@ function reconcileStaleIds(source, allItems, openIds) {
     // Reopened here, not yet confirmed by the source: re-marking it done now
     // would undo the uncheck before the reopen has round-tripped.
     if (it.reopenPending === true) continue;
+    // Outside what the fetch just asked for: its absence is the filter
+    // talking, not the source. Optional, because only ClickUp has a query
+    // the member can narrow.
+    if (typeof inScope === 'function' && !inScope(it)) continue;
     out.push(it);
   }
   return out;
+}
+
+// Does an absent item's shadow speak for the query that just ran?
+//
+// A shadow is rewritten with the current scope every time the source returns
+// the item, so a shadow carrying a DIFFERENT scope was last confirmed under a
+// different question: switching ClickUp subtasks off, pinning a workspace, or
+// putting a token for another account in the settings all make items vanish
+// from the open set without anything having been completed.
+//
+// No scope on either side is a yes: a source whose query never narrows passes
+// none, and a shadow written before scopes existed has none. That second case
+// is a one-sync window on upgrade only, because every item the source still
+// returns is stamped before reconcile runs in the same pass.
+function scopeAgrees(shadow, scope) {
+  if (!scope) return true;
+  const was = shadow && shadow.scope;
+  if (!was) return true;
+  return was === scope;
 }
 
 /* ========================================================================== *
@@ -6239,9 +6340,10 @@ class IcorPlannerPlugin extends Plugin {
         this.syncStatus[source] = {
           ok: result.ok, reason: result.reason || null, message: result.message || null,
           hint: result.hint || null, docUrl: result.docUrl || null,
+          warning: result.warning || null, complete: result.complete !== false,
           count: result.items.length, at: new Date().toISOString(),
         };
-        if (result.ok) await this.upsertSource(source, result.items);
+        if (result.ok) await this.upsertSource(source, result);
       }
       // A sync the user pressed for, with a source misconfigured: say what
       // went wrong and what to do about it, once, here, not only in the tray.
@@ -6294,7 +6396,11 @@ class IcorPlannerPlugin extends Plugin {
   // v0.2.0: per item, the two-way fields go through threeWayMerge against the
   // stored shadow - local edits push, source edits pull, source wins conflicts.
   // Failed pushes keep the old baseline so the next sync retries them.
-  async upsertSource(source, items) {
+  async upsertSource(source, result) {
+    const items = (result && result.items) || [];
+    // What question this answer answered (ClickUp's filter today, nothing
+    // anywhere else). Null means the query cannot narrow.
+    const scope = (result && result.scope) || null;
     const folder = this.paths().sourceFolder(source);
     const s = this.withSecrets(); // shallow: s._shadow is the live map
     const allItems = collectItems(this.app, this.paths().root);
@@ -6349,6 +6455,7 @@ class IcorPlannerPlugin extends Plugin {
         }
       }
       if (nextShadow.done && shadow && shadow.doneAt) nextShadow.doneAt = shadow.doneAt;
+      if (scope) nextShadow.scope = scope;
       s._shadow[key] = nextShadow;
       await this.updateItemFile(prior, t, finals, body, plan);
       if (plan.resetChildrenDoneLocal) advancedParents.push(key);
@@ -6374,7 +6481,22 @@ class IcorPlannerPlugin extends Plugin {
     // The shadow is KEPT, marked done: it is what lets an uncheck after this
     // sync still reach the source. Pruning happens by pruneShadows below.
     const nowMs = Date.now();
-    for (const it of reconcileStaleIds(source, allItems, openIds)) {
+    // Three things have to hold before absence counts as evidence.
+    //
+    // The walk must have read the WHOLE open set: one that stopped at its page
+    // cap read a window, and every task behind the cap is open, not finished.
+    // The fetch must have returned something: a healthy fetch of zero items is
+    // indistinguishable from a filter that matched nothing, and reconciling it
+    // retires the entire source in a single pass. And per item, the query that
+    // last saw it must be the query that just ran.
+    //
+    // The upserts above ran either way, so the board stays live while a source
+    // is over its ceiling; only the writes that say "done" stand down.
+    const complete = !(result && result.complete === false);
+    const stale = complete && items.length > 0
+      ? reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[`${source}:${it.id}`], scope))
+      : [];
+    for (const it of stale) {
       const key = `${source}:${it.id}`;
       s._shadow[key] = Object.assign({}, s._shadow[key] || {
         due: it.due, priority: it.priority, description: '',
@@ -8397,6 +8519,11 @@ class PlannerBoardView extends ItemView {
       const st = this.plugin.syncStatus[key];
       if (st && !st.ok && st.reason !== 'no-token') {
         notices.push(`${SOURCES[key].label}: ${st.message}${st.hint ? ` ${st.hint}` : ''}`);
+      } else if (st && st.ok && st.warning) {
+        // Healthy, incomplete: the cards are real, the open set is not the
+        // whole open set, and nothing was marked done from it. Same row, same
+        // styling as a failure line - there is nothing new to look at here.
+        notices.push(`${SOURCES[key].label}: ${st.warning}`);
       }
     }
     if (this.plugin.calendarStatus && !this.plugin.calendarStatus.ok &&
@@ -10252,7 +10379,7 @@ module.exports.__test = {
   plannerPaths, normalizePlannerFolder, detectPlannerFolder, plannerFolderChangePlan, gitignoreLineFor, collectItems,
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
   WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
-  icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult,
+  icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult, truncatedWarning,
   threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS,
   htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
   trayDefaultTab, trayVisibleTabs, trayTabLabel, trayEffectiveTab,
@@ -10260,7 +10387,7 @@ module.exports.__test = {
   trayRevealDecision, trayRevealSpendsTurn,
   sourceConfigured, isSyncedSource, canPushToSource, canCompleteOnSource,
   SYNCED_SOURCES, TASK_SOURCES, MANUAL_SOURCE, FETCHED_SOURCES, CONNECTORS,
-  manualExternalId, manualItemFrontmatter, reconcileStaleIds,
+  manualExternalId, manualItemFrontmatter, reconcileStaleIds, scopeAgrees, clickupScopeKey, EMAIL_MAX_ITEMS,
   itemFromFrontmatter, clampPriorityRank, safeBasename,
   syncCompletionPlan, occurrenceAdvanced, reopenDecision, appendOccurrence,
   ghostItemsFor, pruneShadows, normalizeOccurrences, OCCURRENCE_CAP, DONE_SHADOW_MAX_AGE_MS,
