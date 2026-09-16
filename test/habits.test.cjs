@@ -126,7 +126,7 @@ test('the planner shape parses; the My Life shape and a planner item do not coll
   assert.deepEqual(full, {
     path: p, slug: 'Daily Scratchpad writing', name: 'Daily Scratchpad writing',
     cadence: 'daily', cadenceDays: null, monthDay: null, status: 'active', startedOn: '2026-08-27',
-    linkedNote: '[[Daily Scratchpad writing]]', linkedBasename: 'Daily Scratchpad writing',
+    linkedNote: '[[Daily Scratchpad writing]]', linkedBasename: 'Daily Scratchpad writing', linkedTarget: 'Daily Scratchpad writing',
     logSchema: null, log: T.parseLogTable('', 'habit-log'),
   });
   assert.deepEqual(T.habitDays(full), T.WEEKDAY_CODES, 'daily shows every day');
@@ -134,6 +134,9 @@ test('the planner shape parses; the My Life shape and a planner item do not coll
   assert.equal(habit({ cadence: 'daily' }, '', `${HABITS}/Walk.md`).name, 'Walk');
   assert.equal(habit({ cadence: 'daily', linked_note: '[[04 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedBasename, 'Walk');
   assert.equal(habit({ cadence: 'daily', linked_note: '[[Walk#Log]]' }, '').linkedBasename, 'Walk');
+  // and the target keeps the folders the basename drops: the My Life note
+  // and this one share a name, so only the target names one file (0.14.1)
+  assert.equal(habit({ cadence: 'daily', linked_note: '[[04 Inner World/My Life/Habits/Walk|the walk]]' }, '').linkedTarget, '04 Inner World/My Life/Habits/Walk');
   assert.equal(habit({ cadence: 'daily' }, '').linkedNote, null);
   assert.equal(T.wikilinkBasename('Walk'), 'Walk');
   assert.equal(T.wikilinkBasename(''), null);

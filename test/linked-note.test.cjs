@@ -25,6 +25,7 @@ test('the field reads back as the note it names, whatever shape it was written i
   assert.equal(item({ linked_note: '[[myicor-product]]' }).linkedNote, 'myicor-product');
   assert.equal(item({ linked_note: 'myicor-product' }).linkedNote, 'myicor-product');
   assert.equal(item({ linked_note: '[[My Life/Projects/chaser|Chaser]]' }).linkedNote, 'chaser');
+  assert.equal(item({ linked_note: '[[My Life/Projects/chaser|Chaser]]' }).linkedNoteTarget, 'My Life/Projects/chaser', 'the name is for the menu, the target for the resolver');
   assert.equal(item({ linked_note: '[[chaser#Scope]]' }).linkedNote, 'chaser');
   assert.equal(item({ linked_note: null }).linkedNote, null);
   assert.equal(item({}).linkedNote, null, 'an absent field is no link, not an empty string');
@@ -33,7 +34,10 @@ test('the field reads back as the note it names, whatever shape it was written i
 test('the stored shape is always a wikilink, or nothing at all', () => {
   assert.equal(T.normalizeLinkedNote('myicor-product'), '[[myicor-product]]');
   assert.equal(T.normalizeLinkedNote('[[myicor-product]]'), '[[myicor-product]]');
-  assert.equal(T.normalizeLinkedNote('[[a/b|c]]'), '[[b]]');
+  // a folder the person typed is kept: it is how they say WHICH note, when
+  // two of them share a name (0.14.1). The alias and the heading still go.
+  assert.equal(T.normalizeLinkedNote('[[a/b|c]]'), '[[a/b]]');
+  assert.equal(T.normalizeLinkedNote('[[a/b#Log]]'), '[[a/b]]');
   assert.equal(T.normalizeLinkedNote(''), null);
   assert.equal(T.normalizeLinkedNote('   '), null);
   assert.equal(T.normalizeLinkedNote(null), null);

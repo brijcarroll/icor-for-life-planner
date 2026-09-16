@@ -4214,12 +4214,13 @@ const PLAN_OWNED_ITEM_FIELDS = [
   'planned_day', 'planned_half', 'planned_order', 'done_local', 'weekly_goal', 'linked_note',
 ];
 
-// A linked-note value as it is STORED: `[[Note name]]`, or null for none.
+// A linked-note value as it is STORED: `[[Note]]`, or null for none.
 // Accepts a bare name, a wikilink, or a wikilink with an alias or a heading,
-// and keeps only the note it names - the same shape habitFrontmatterOf writes.
+// and keeps the note it names WITH the folders it was given - the same shape
+// habitFrontmatterOf writes. A typed-in path is the person saying which of
+// two same-named notes they mean, so it is kept rather than flattened.
 function normalizeLinkedNote(raw) {
-  const base = wikilinkBasename(raw);
-  return base ? `[[${base}]]` : null;
+  return wikilinkOf(wikilinkTarget(raw));
 }
 
 // The normalizer, pure and shared: one place decides what a frontmatter block
@@ -4256,9 +4257,13 @@ function itemFromFrontmatter(fm, path, basename) {
     // what every surface says since 0.14.0. The key is not renamed: a
     // plugin-written field name is a migration, a label is not.
     weeklyGoal: fm.weekly_goal === true,
-    // The note this task is for (0.14.0), as a basename. Plan-owned: no sync
-    // run reads it, writes it or clears it.
+    // The note this task is for (0.14.0). Plan-owned: no sync run reads it,
+    // writes it or clears it. Two readings, because there are two questions:
+    // `linkedNote` is what to CALL it (the menu says "Open chaser", not
+    // "Open 04 Inner World/My Life/Projects/chaser"), `linkedNoteTarget` is
+    // what to RESOLVE and what the editor starts from, folders and all.
     linkedNote: wikilinkBasename(fm.linked_note),
+    linkedNoteTarget: wikilinkTarget(fm.linked_note),
     // Recurrence (2026-09-04). `recurring` is three-valued on purpose: true,
     // false, or null for "unknown" (a note from before the field existed, or
     // a ClickUp task, whose API has no flag). The occurrence rule treats
@@ -5322,6 +5327,44 @@ function wikilinkBasename(raw) {
   const inner = (m ? m[1] : s).split('|')[0].split('#')[0];
   return basenameOf(inner.trim()) || null;
 }
+// The note a wikilink names, as a link TARGET: the folders it carries are
+// KEPT, the alias, the heading and a ".md" are not. [[a/b|c]] is a/b, a bare
+// name is itself, a note path is the path without its extension. Null for
+// nothing. The companion of wikilinkBasename, which answers the display
+// question ("what is this note called") rather than the storage one ("which
+// file does this name"). A habit lives in two notes that share a basename by
+// design, so only the target can say which of them a link means.
+function wikilinkTarget(raw) {
+  const s = String(raw == null ? '' : raw).trim();
+  const m = /^\[\[([^\]]+)\]\]$/.exec(s);
+  const inner = (m ? m[1] : s).split('|')[0].split('#')[0];
+  const t = inner.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+    .replace(/^\/+|\/+$/g, '').replace(/\.md$/i, '');
+  return t || null;
+}
+// The stored shape of a link: `[[<target>]]`, or null for none.
+function wikilinkOf(target) { return target ? `[[${target}]]` : null; }
+// A target under the folder it is known to live in. A target that already
+// names a folder is AUTHORITY and passes through untouched, which is what
+// makes the one-time rewrite idempotent and lets a person move a note and
+// keep the link. A bare name gains the folder, so the link names one file
+// rather than every file with that name.
+function qualifyLinkTarget(raw, folder) {
+  const t = wikilinkTarget(raw);
+  if (!t || t.includes('/')) return t;
+  const f = String(folder == null ? '' : folder).trim().replace(/^\/+|\/+$/g, '');
+  return f ? `${f}/${t}` : t;
+}
+// The file a stored link names, or null. The whole TARGET goes to the
+// resolver, never the basename: Obsidian resolves a bare name by proximity
+// to the note the link sits in, so a planner habit note asking for "Walk"
+// got itself back instead of the My Life note it points at.
+function linkedFileOf(app, raw, sourcePath) {
+  const target = wikilinkTarget(raw);
+  if (!target || !app || !app.metadataCache) return null;
+  const file = app.metadataCache.getFirstLinkpathDest(target, sourcePath || '');
+  return file instanceof TFile ? file : null;
+}
 
 // The habit a planner note describes, or null. `fm` is the metadata
 // cache's frontmatter, `path` the note path, `body` the note text
@@ -5344,7 +5387,10 @@ function habitFromFrontmatter(fm, path, body) {
     status: habitStatusOf(fm.status),
     startedOn: ISO_DAY_RE.test(startedOn) ? startedOn : null,
     linkedNote: linked || null,
+    // The same two questions the item side asks: what to call it, and which
+    // file it is. The My Life note and this one share a basename by design.
     linkedBasename: linked ? wikilinkBasename(linked) : null,
+    linkedTarget: linked ? wikilinkTarget(linked) : null,
     logSchema: log.found ? (log.schema || 'streak') : null,
     log,
   };
@@ -5513,6 +5559,9 @@ function validateHabitInput(input, opts) {
 // none is given: a calendar date, the LOCAL one (todayStr), never the
 // UTC day of nowIso. A member importing at 19:20 Pacific got a start date
 // one day in the future because the two were the same slice.
+// `opts.linkFolder` is the My Life Habits room from the settings: a bare
+// linked-note name gains it, so `linked_note` names one file rather than
+// every file called that. A value that already names a folder keeps it.
 function habitFrontmatterOf(input, opts) {
   const i = input || {};
   const o = opts || {};
@@ -5520,7 +5569,7 @@ function habitFrontmatterOf(input, opts) {
   const today = ISO_DAY_RE.test(String(o.today == null ? '' : o.today)) ? String(o.today) : todayStr();
   const cadence = normalizeCadence(i.cadence);
   const started = String(i.startedOn == null ? '' : i.startedOn).trim().slice(0, 10);
-  const linked = i.linkedNote == null ? null : wikilinkBasename(i.linkedNote);
+  const linked = i.linkedNote == null ? null : qualifyLinkTarget(i.linkedNote, o.linkFolder);
   const fm = {
     type: HABIT_TYPE,
     name: String(i.name == null ? '' : i.name).trim() || 'Habit',
@@ -5574,8 +5623,9 @@ function habitTemplate(input, opts) {
 // cadence mapped (daily, weekdays or its weekday alias, weekly with the
 // days, monthly with its day; unknown or adhoc is weekly with no days); the
 // start from `started_on` or `since`; the status carried (abandoned is
-// archived); the link back to the note by its basename.
-function importMapping(fm, basename) {
+// archived); the link back to the note by its PATH, because the planner
+// note about to be created will share its basename.
+function importMapping(fm, basename, sourcePath) {
   const f = fm || {};
   const raw = String(f.cadence == null ? '' : f.cadence).trim().toLowerCase();
   const cadence = normalizeCadence(raw);
@@ -5592,7 +5642,7 @@ function importMapping(fm, basename) {
     monthDay: cadence === 'monthly' ? monthDayOf(f.month_day) : null,
     startedOn: ISO_DAY_RE.test(started) ? started : null,
     status: habitStatusOf(f.status),
-    linkedNote: `[[${basename}]]`,
+    linkedNote: wikilinkOf(wikilinkTarget(sourcePath) || basename),
   };
 }
 // The import's rows: the My Life notes that are habits (by the My Life
@@ -5610,7 +5660,7 @@ function importPlan(notes, plannerHabits) {
     if (!n || !isHabitFrontmatter(n.fm) || isPlannerHabitFrontmatter(n.fm) || importDone(n.fm)) continue;
     const basename = n.basename || basenameOf(n.path);
     if (!habitBasenameOk(basename)) continue;
-    out.push({ path: n.path, basename, ...importMapping(n.fm, basename), existingPlanner: byLink.get(basename) || null });
+    out.push({ path: n.path, basename, ...importMapping(n.fm, basename, n.path), existingPlanner: byLink.get(basename) || null });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -5658,15 +5708,18 @@ function moveHabitLog(body, plannerSlug) {
 //     cadence that just left);
 //   - `planner_habit`, the back-link, is added at the end of the block or
 //     replaces the line it already has, quoted the way processFrontMatter
-//     writes a value that starts with a bracket.
+//     writes a value that starts with a bracket. `plannerLink` is the
+//     planner note's TARGET (its path without the extension), never a bare
+//     slug: the two notes of a habit share a basename, so a bare link
+//     cannot name one of them.
 // Every other line stays byte for byte, comments and blank lines
 // included; CRLF is kept (lines split on "\n" keep their "\r", new lines
 // copy the opening line's ending); a note with no block gets one.
 const FM_KEY_RE = /^([A-Za-z0-9_][A-Za-z0-9_.-]*)\s*:(?:\s|$)/;
 const FM_CONTINUATION_RE = /^(\s+\S|-\s)/;
-function importSourceFrontmatterText(text, plannerSlug) {
+function importSourceFrontmatterText(text, plannerLink) {
   const src = String(text == null ? '' : text);
-  const link = `planner_habit: ${JSON.stringify(`[[${plannerSlug}]]`)}`;
+  const link = `planner_habit: ${JSON.stringify(`[[${plannerLink}]]`)}`;
   const lines = src.split('\n');
   const opens = lines.length > 1 && lines[0].replace(/\r$/, '') === '---';
   let close = -1;
@@ -5715,6 +5768,62 @@ const IMPORT_EDITS_TEXT = 'In each My Life note the import: removes cadence, cad
 // between its writes shows the note again and the import resumes it.
 function importDone(fm) {
   return !!fm && typeof fm === 'object' && fm.planner_habit != null && String(fm.planner_habit).trim() !== '';
+}
+
+/* ---- the one-time link qualification (0.14.1) ---------------------------- */
+
+// One frontmatter line, rewritten in place. The block is edited as TEXT,
+// the same path the import has taken since 0.11.0, so a note's YAML
+// comments and blank lines survive; no other line is looked at and the body
+// is never touched. A value that already names a folder is left alone, so a
+// second run writes nothing at all.
+//
+// Only the three shapes the plugin itself writes are rewritten: `[[X]]`,
+// `"[[X]]"` and `'[[X]]'`, where X is a plain name, with nothing after them.
+// Anything else (an empty value, a trailing comment, an alias, a heading, a
+// list) is a shape this does not understand well enough to rewrite without
+// losing something a person put there, so it is returned untouched.
+const FM_PLAIN_LINK_RE = /^(?:"(\[\[[^"\]|#]+\]\])"|'(\[\[[^'\]|#]+\]\])'|(\[\[[^\]|#]+\]\]))$/;
+function qualifyFrontmatterLink(text, key, folder) {
+  const src = String(text == null ? '' : text);
+  const lines = src.split('\n');
+  if (!(lines.length > 1 && lines[0].replace(/\r$/, '') === '---')) return src;
+  let close = -1;
+  for (let i = 1; i < lines.length; i++) if (lines[i].replace(/\r$/, '') === '---') { close = i; break; }
+  if (close < 0) return src;
+  for (let i = 1; i < close; i++) {
+    const raw = lines[i];
+    const line = raw.replace(/\r$/, '');
+    const m = FM_KEY_RE.exec(line);
+    if (!m || m[1] !== key) continue;
+    const shape = FM_PLAIN_LINK_RE.exec(line.slice(m[0].length).trim());
+    if (!shape) return src;
+    const target = wikilinkTarget(shape[1] || shape[2] || shape[3]);
+    if (!target || target.includes('/')) return src;
+    const qualified = qualifyLinkTarget(target, folder);
+    if (!qualified || qualified === target) return src;
+    lines[i] = `${key}: ${JSON.stringify(`[[${qualified}]]`)}${raw.endsWith('\r') ? '\r' : ''}`;
+    return lines.join('\n');
+  }
+  return src;
+}
+
+// Which notes still carry a folderless cross-link, and what each one needs.
+// Pure: `plannerHabits` are the parsed planner notes, `sourceNotes` the
+// { path, fm } of the My Life room, `folders` the two settings. An empty
+// result is the steady state, which is how "a second run changes nothing"
+// is read off the plan rather than off the disk.
+function qualifyLinkPlan(plannerHabits, sourceNotes, folders) {
+  const f = folders || {};
+  const out = [];
+  const bare = (raw) => { const t = wikilinkTarget(raw); return !!t && !t.includes('/'); };
+  for (const h of plannerHabits || []) {
+    if (h && h.path && bare(h.linkedNote)) out.push({ path: h.path, field: 'linked_note', folder: f.importFolder });
+  }
+  for (const n of sourceNotes || []) {
+    if (n && n.path && importDone(n.fm) && bare(n.fm.planner_habit)) out.push({ path: n.path, field: 'planner_habit', folder: f.plannerFolder });
+  }
+  return out;
 }
 // The planner note adopting a log block that is still in the source (a
 // run that stopped before the body write): only when the planner note has
@@ -7609,9 +7718,12 @@ class IcorPlannerPlugin extends Plugin {
     const nowIso = new Date().toISOString();
     const today = todayStr();
     const lenient = !!o.lenient;
-    const text = habitTemplate(input, { nowIso, today, lenient, logBlock: o.logBlock });
+    // The room the linked note lives in, from the setting: a bare name from
+    // the dialog's dropdown becomes the path of the note it came from.
+    const linkFolder = this.habitsImportFolder();
+    const text = habitTemplate(input, { nowIso, today, lenient, linkFolder, logBlock: o.logBlock });
     const file = await this.app.vault.create(path, text);
-    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso, today, lenient }), path, text);
+    const habit = habitFromFrontmatter(habitFrontmatterOf(input, { nowIso, today, lenient, linkFolder }), path, text);
     if (habit && file instanceof TFile) {
       habit.file = file;
       this._habitCache.set(path, { mtime: file.stat ? file.stat.mtime : 0, habit });
@@ -7645,6 +7757,41 @@ class IcorPlannerPlugin extends Plugin {
       : [];
     return files.map((f) => f.basename).sort((a, b) => a.localeCompare(b));
   }
+  // The one-time link qualification (0.14.1). Both cross-links between a
+  // habit's two notes are rewritten to the full vault path, once each: a
+  // habit exists twice by design, the two notes share a name, and a bare
+  // [[X]] cannot say which of them it means. It runs at the top of an
+  // import because that is the one moment the person has agreed to a write
+  // in the My Life room; the settings sentence already says so. Idempotent
+  // by construction: the plan only names a note whose value is still
+  // folderless, and the text edit refuses anything it does not recognise,
+  // so a second run writes nothing.
+  async qualifyHabitLinks() {
+    const folders = { importFolder: this.habitsImportFolder(), plannerFolder: this.habitsFolder() };
+    const folder = this.app.vault.getAbstractFileByPath(folders.importFolder);
+    const sources = (folder instanceof TFolder ? (folder.children || []) : [])
+      .filter((c) => c instanceof TFile && c.extension === 'md')
+      .map((f) => ({ path: f.path, fm: (this.app.metadataCache.getFileCache(f) || {}).frontmatter }));
+    for (const row of qualifyLinkPlan(this.habits || [], sources, folders)) {
+      // The same boundary every other write has: the planner room for the
+      // planner note, the import room for the My Life note, checked before
+      // the file is looked up.
+      const inside = row.field === 'linked_note'
+        ? habitPathInside(this.settings, row.path)
+        : importPathInside(this.settings, row.path);
+      if (!inside) continue;
+      const file = this.app.vault.getAbstractFileByPath(row.path);
+      if (!(file instanceof TFile)) continue;
+      try {
+        // A text edit, never Obsidian's frontmatter editor: that one
+        // reserialises the block and drops the note's comment lines (0.11.0).
+        await this.app.vault.process(file, (data) => qualifyFrontmatterLink(data, row.field, row.folder));
+      } catch (e) {
+        console.error('icor-planner: could not qualify', row.field, 'on', row.path, e);
+      }
+    }
+  }
+
   // The import, for the chosen candidates. Per note, in this order: the
   // planner note is created with the log block copied into it; then the My
   // Life note gives up the block for the pointer line (vault.process) and
@@ -7662,6 +7809,7 @@ class IcorPlannerPlugin extends Plugin {
   // Returns { done, skipped, failed }.
   async importHabits(candidates) {
     const result = { done: 0, skipped: 0, failed: [] };
+    await this.qualifyHabitLinks();
     for (const c of candidates || []) {
       if (!c || !importPathInside(this.settings, c.path)) { result.skipped++; continue; }
       try {
@@ -7679,7 +7827,14 @@ class IcorPlannerPlugin extends Plugin {
         } else {
           path = await this.createHabit(c, { logBlock, quiet: true, lenient: true });
         }
+        // Two readings of the planner note, on purpose. The BODY pointer
+        // keeps the short name it has always had: it is prose a person
+        // reads, it sits in a note that has no same-named neighbour, and
+        // changing it would make an already-pointed note look unpointed and
+        // gain a second line. The FRONTMATTER back-link takes the path,
+        // because that field is read by machines and must name one file.
         const slug = basenameOf(path);
+        const plannerLink = wikilinkTarget(path);
         if (logBlock || !body.includes(habitPointerLine(slug))) {
           await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
         }
@@ -7687,7 +7842,7 @@ class IcorPlannerPlugin extends Plugin {
         // rewrite the block and drop its comment lines). The metadata
         // cache reparses after the write, so importDone reads the
         // back-link on the next run.
-        await this.app.vault.process(src, (data) => importSourceFrontmatterText(data, slug));
+        await this.app.vault.process(src, (data) => importSourceFrontmatterText(data, plannerLink));
         result.done++;
       } catch (e) {
         result.failed.push(`${c.basename}: ${(e && e.message) || e}`);
@@ -8223,7 +8378,7 @@ function showCardMenu(plugin, item, view, pos) {
   if (item.linkedNote) {
     menu.addItem((mi) => mi.setTitle(`Open ${item.linkedNote}`)
       .setIcon('file-symlink').onClick(() => {
-        const file = plugin.app.metadataCache.getFirstLinkpathDest(item.linkedNote, item.path);
+        const file = linkedFileOf(plugin.app, item.linkedNoteTarget, item.path);
         if (file instanceof TFile) plugin.app.workspace.getLeaf('tab').openFile(file);
         else new Notice(`No note named ${item.linkedNote} in this vault.`);
       }));
@@ -9714,8 +9869,11 @@ class PlannerTrayView extends ItemView {
     if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
   }
   openLinkedNote(h) {
-    if (!h.linkedBasename) return;
-    const file = this.app.metadataCache.getFirstLinkpathDest(h.linkedBasename, h.path);
+    if (!h.linkedTarget) return;
+    // The whole target, never the basename: the My Life note and this one
+    // share a name, and a bare link resolves to the nearer of the two,
+    // which is this note itself.
+    const file = linkedFileOf(this.app, h.linkedTarget, h.path);
     if (file instanceof TFile) this.app.workspace.getLeaf('tab').openFile(file);
     else new Notice(`Planner: no note called "${h.linkedBasename}" in this vault.`);
   }
@@ -10034,7 +10192,10 @@ class LinkNoteModal extends Modal {
     contentEl.addClass('iplan-habit-modal');
     contentEl.addClass('iplan-settings');
     markInkPlugin(contentEl, this.plugin.manifest.id);
-    const state = { name: this.item.linkedNote || '' };
+    // The field starts from the whole stored target, folders and all: a
+    // person who typed a path to disambiguate must not lose it by opening
+    // the editor and pressing Save.
+    const state = { name: this.item.linkedNoteTarget || '' };
     let input = null;
     const kicker = contentEl.createDiv({ cls: 'iplan-kicker' });
     kicker.createSpan({ cls: 'iplan-kicker-marker', text: '/' });
@@ -11172,12 +11333,12 @@ module.exports.__test = {
   HABIT_MONTH_DAY_MAX, HABIT_SCHEDULE_FIELDS, HABIT_IMPORT_REMOVED_FIELDS, BOARD_ONLY_TABS,
   normalizeVaultFolder, normalizeHabitsFolder, habitsImportFolderOf, importPathInside, habitPathInside, migrateHabitSettings,
   normalizeCadence, habitStatusOf, monthDayOf, isPlannerHabitFrontmatter, isHabitFrontmatter, habitBasenameOk,
-  basenameOf, wikilinkBasename, habitFromFrontmatter,
+  basenameOf, wikilinkBasename, wikilinkTarget, wikilinkOf, qualifyLinkTarget, linkedFileOf, habitFromFrontmatter,
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
   habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
   importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, importSourceFrontmatterText,
   importCandidateText, importButtonText, importSummaryText, importFolderText, habitsCountText, trayTabName,
-  IMPORT_EDITS_TEXT, importDone, adoptLogBlock,
+  IMPORT_EDITS_TEXT, importDone, adoptLogBlock, qualifyFrontmatterLink, qualifyLinkPlan,
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,

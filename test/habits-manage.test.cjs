@@ -355,8 +355,9 @@ test('SOURCE: created_at is the instant, started_on the local day; createHabit p
   assert.ok(/const today = ISO_DAY_RE\.test\(String\(o\.today == null \? '' : o\.today\)\) \? String\(o\.today\) : todayStr\(\);/.test(fn), 'opts.today, else the local clock');
   assert.ok(/fm\.created_at = nowIso;/.test(fn), 'the instant stays');
   const create = main.slice(main.indexOf('  async createHabit('), main.indexOf('  freeHabitPath(') > 0 && main.indexOf('  freeHabitPath(') > main.indexOf('  async createHabit(') ? main.indexOf('  freeHabitPath(') : main.indexOf('  async importHabits('));
-  assert.ok(/const today = todayStr\(\);\s*\n\s*const lenient = !!o\.lenient;\s*\n\s*const text = habitTemplate\(input, \{ nowIso, today, lenient, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day');
-  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient \}\)/.test(create), 'and so does the cache entry');
+  assert.ok(/const today = todayStr\(\);\s*\n\s*const lenient = !!o\.lenient;/.test(create), 'the day is pinned once');
+  assert.ok(/const text = habitTemplate\(input, \{ nowIso, today, lenient, linkFolder, logBlock: o\.logBlock \}\);/.test(create), 'the template takes the pinned day and the room the linked note lives in');
+  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient, linkFolder \}\)/.test(create), 'and so does the cache entry');
   // the calendar-date fields across the writers: due comes from the source or
   // the note, planned_day from the board; no writer derives one from an instant
   const code = main.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');

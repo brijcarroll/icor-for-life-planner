@@ -17,6 +17,9 @@ const PluginClass = require(T.__mainPath);
 const { TFile, TFolder } = T.__obsidian;
 
 const MY = '04 Inner World/My Life/Habits';
+// The planner's own Habits room. A habit lives in both, under the same
+// name, which is why both cross-links carry a folder (0.14.1).
+const PL = '02 Planner/Habits';
 const LOG_BLOCK = [
   '<!-- habit-log: schema=streak -->',
   '| Date | Y/N | Note |',
@@ -54,7 +57,7 @@ const MY_NOTE_IMPORTED = MY_NOTE
   .replace(LOG_BLOCK, 'Schedule and check-ins: [[Morning pages]]')
   .replace(
     'cadence: weekly\ncadence_days: [mon, wed, fri]\nstatus: active\nstarted_on: 2026-08-27\nkey_element: "[[Writing]]"\n---',
-    'status: active\nkey_element: "[[Writing]]"\ntype: habit\nplanner_habit: "[[Morning pages]]"\n---',
+    `status: active\nkey_element: "[[Writing]]"\ntype: habit\nplanner_habit: "[[${PL}/Morning pages]]"\n---`,
   );
 
 test('THE ASK: the plan lists only the habit notes no planner note links to yet', () => {
@@ -80,7 +83,7 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
   assert.equal(by.Rent.monthDay, null, 'a monthly note with no month_day maps to no day, never to the 1st (2026-09-07)');
   assert.deepEqual(by['Morning pages'], {
     path: `${MY}/Morning pages.md`, basename: 'Morning pages', name: 'Morning pages',
-    cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], monthDay: null, startedOn: '2026-08-27', status: 'active', linkedNote: '[[Morning pages]]',
+    cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], monthDay: null, startedOn: '2026-08-27', status: 'active', linkedNote: `[[${MY}/Morning pages]]`,
     existingPlanner: null,
   });
   assert.equal(by.Walk.existingPlanner, '02 Planner/Habits/Walk.md', 'the half-done note resumes into the planner note that links back');
@@ -93,8 +96,8 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
   assert.deepEqual([by.Weekday.cadence, by.Weekday.cadenceDays], ['weekdays', []]);
   assert.deepEqual([by.Odd.cadence, by.Odd.cadenceDays], ['weekly', []], 'unknown is weekly with no days');
   // the scaffold example maps by since; the name falls back to the file name
-  const walk = T.importMapping({ type: 'habit', cadence: 'daily', since: '2026-08-01' }, 'Walk');
-  assert.deepEqual([walk.name, walk.cadence, walk.startedOn, walk.linkedNote], ['Walk', 'daily', '2026-08-01', '[[Walk]]']);
+  const walk = T.importMapping({ type: 'habit', cadence: 'daily', since: '2026-08-01' }, 'Walk', `${MY}/Walk.md`);
+  assert.deepEqual([walk.name, walk.cadence, walk.startedOn, walk.linkedNote], ['Walk', 'daily', '2026-08-01', `[[${MY}/Walk]]`]);
   // with nothing linked everything lists; with nothing to list, nothing
   assert.equal(T.importPlan(notes, []).length, 7);
   assert.equal(T.importPlan(notes, []).find((c) => c.basename === 'Walk').existingPlanner, null);
@@ -110,8 +113,8 @@ test('THE ASK: the log block moves byte-exact, the pointer line takes its place,
   assert.equal(T.habitPointerLine('Morning pages'), 'Schedule and check-ins: [[Morning pages]]');
   assert.equal(T.habitLogBlockOf(after), null, 'the block is gone from the source');
   // the planner note carries the block verbatim in its own log section
-  const planner = T.habitTemplate({ name: 'Morning pages', cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], startedOn: '2026-08-27', linkedNote: '[[Morning pages]]' },
-    { nowIso: '2026-09-06T10:00:00.000Z', logBlock: block });
+  const planner = T.habitTemplate({ name: 'Morning pages', cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], startedOn: '2026-08-27', linkedNote: 'Morning pages' },
+    { nowIso: '2026-09-06T10:00:00.000Z', linkFolder: MY, logBlock: block });
   assert.ok(planner.includes(`\n## Log\n${LOG_BLOCK}\n`), 'byte-exact under the planner heading');
   assert.equal(T.habitLogBlockOf(planner), LOG_BLOCK);
   const rows = T.parseLogTable(planner, 'habit-log').rows;
@@ -301,16 +304,16 @@ test('THE ASK: the import creates the planner note first, then edits the My Life
   assert.match(planner, /^cadence: weekly$/m);
   assert.match(planner, /^cadence_days: \[mon, wed, fri\]$/m);
   assert.match(planner, /^started_on: 2026-08-27$/m);
-  assert.match(planner, /^linked_note: "\[\[Morning pages\]\]"$/m);
+  assert.match(planner, new RegExp(`^linked_note: "\\[\\[${MY}/Morning pages\\]\\]"$`, 'm'));
   assert.ok(planner.includes(`\n## Log\n${LOG_BLOCK}\n`), 'the block moved byte-exact');
   assert.match(calls.create[1].content, /^cadence: daily$/m);
   assert.match(calls.create[1].content, /^started_on: 2026-08-01$/m, 'since becomes started_on');
   assert.match(calls.create[1].content, /<!-- habit-log: schema=streak -->\n\| Date \| Y\/N \| Note \|\n\| --- \| --- \| --- \|\n$/, 'no log in the source: the empty section');
   // the My Life notes: the pointer in place of the block, the fields gone
   assert.equal(files[`${MY}/Morning pages.md`].text, MY_NOTE_IMPORTED);
-  assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: '[[Morning pages]]' }, 'a lived-vault note gains its type and the back-link');
-  assert.equal(files[`${MY}/Walk.md`].text, '---\ntype: habit\nplanner_habit: "[[Walk]]"\n---\n\n# Walk\n\nSchedule and check-ins: [[Walk]]\n', 'the type it had stays where it was; cadence and since are gone; the back-link is last');
-  assert.deepEqual(files[`${MY}/Walk.md`].fm, { type: 'habit', planner_habit: '[[Walk]]' }, 'since is gone: the date lives once, in the planner note');
+  assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: `[[${PL}/Morning pages]]` }, 'a lived-vault note gains its type and the back-link');
+  assert.equal(files[`${MY}/Walk.md`].text, `---\ntype: habit\nplanner_habit: "[[${PL}/Walk]]"\n---\n\n# Walk\n\nSchedule and check-ins: [[Walk]]\n`, 'the type it had stays where it was; cadence and since are gone; the back-link is a path, the body pointer the short name it always had');
+  assert.deepEqual(files[`${MY}/Walk.md`].fm, { type: 'habit', planner_habit: `[[${PL}/Walk]]` }, 'since is gone: the date lives once, in the planner note');
   // the order per note: create, then the body, then the frontmatter, both
   // through vault.process on the My Life note only; processFrontMatter is
   // never called (it would drop the note's comment lines)
@@ -361,9 +364,10 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   assert.ok(/const body = await this\.app\.vault\.read\(src\);\s*\n\s*const logBlock = habitLogBlockOf\(body\);/.test(imp), 'the block is read before the planner note is made');
   assert.ok(/path = await this\.createHabit\(c, \{ logBlock, quiet: true, lenient: true \}\);/.test(imp), 'created first, lenient');
   assert.ok(/await this\.app\.vault\.process\(src, \(data\) => moveHabitLog\(data, slug\)\);/.test(imp), 'then the body, through vault.process');
-  assert.ok(/await this\.app\.vault\.process\(src, \(data\) => importSourceFrontmatterText\(data, slug\)\);/.test(imp), 'then the frontmatter, as a text edit through vault.process: the strip, the type and the back-link in one pass');
+  assert.ok(/const plannerLink = wikilinkTarget\(path\);/.test(imp), 'the planner note is named by its path, because the two notes of a habit share a basename');
+  assert.ok(/await this\.app\.vault\.process\(src, \(data\) => importSourceFrontmatterText\(data, plannerLink\)\);/.test(imp), 'then the frontmatter, as a text edit through vault.process: the strip, the type and the back-link in one pass');
   assert.ok(!/processFrontMatter/.test(imp), 'processFrontMatter never touches the My Life note: it would drop its comment lines');
-  assert.ok(imp.indexOf('createHabit(') < imp.indexOf('moveHabitLog(data, slug)') && imp.indexOf('moveHabitLog(data, slug)') < imp.indexOf('importSourceFrontmatterText(data, slug)'), 'in that order');
+  assert.ok(imp.indexOf('createHabit(') < imp.indexOf('moveHabitLog(data, slug)') && imp.indexOf('moveHabitLog(data, slug)') < imp.indexOf('importSourceFrontmatterText(data, plannerLink)'), 'in that order');
   assert.ok(/if \(importDone\(cache && cache\.frontmatter\)\) \{ result\.skipped\+\+; continue; \}/.test(imp), 'done is read on the source');
   assert.ok(!/linkedBasename/.test(imp), 'never inferred from the planner side');
   // the consent copy: one constant, both surfaces
@@ -399,7 +403,7 @@ test('THE ASK: a run that stops after the body write resumes with the frontmatte
   assert.deepEqual(r2, { done: 1, skipped: 0, failed: [] });
   assert.equal(calls.create.length, 1, 'no duplicate planner note');
   assert.deepEqual(calls.process, [`${MY}/Morning pages.md`, `${MY}/Morning pages.md`], 'the body once in the first run, the frontmatter once in the second: nothing to move, the pointer is there');
-  assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: '[[Morning pages]]' }, 'typed and linked');
+  assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: `[[${PL}/Morning pages]]` }, 'typed and linked');
   assert.ok(calls.create[0].content.includes(LOG_BLOCK), 'the planner note holds the log');
   assert.deepEqual(p.importCandidates().map((c) => c.basename), ['Walk'], 'and it is done');
 });
@@ -420,7 +424,7 @@ test('THE ASK: a run that stops right after creating the planner note resumes wi
   assert.equal(calls.create.length, 1, 'no duplicate planner note');
   assert.equal(files[`${MY}/Morning pages.md`].text, MY_NOTE_IMPORTED);
   assert.equal(files['02 Planner/Habits/Morning pages.md'].text.split(LOG_BLOCK).length, 2, 'the planner note holds the block exactly once');
-  assert.equal(files[`${MY}/Morning pages.md`].fm.planner_habit, '[[Morning pages]]');
+  assert.equal(files[`${MY}/Morning pages.md`].fm.planner_habit, `[[${PL}/Morning pages]]`);
 });
 
 test('adoptLogBlock: a planner note without a sentinel takes the block under its Log heading, one with a sentinel is left alone', () => {
@@ -477,8 +481,8 @@ test('THE ASK: an absent month_day stays absent on import, is required by the di
   // the source: the lenient flag reaches both the note text and the cache entry
   const main = fs.readFileSync(T.__mainPath, 'utf8');
   const create = main.slice(main.indexOf('  async createHabit('), main.indexOf('  async importHabits('));
-  assert.ok(/const lenient = !!o\.lenient;\s*\n\s*const text = habitTemplate\(input, \{ nowIso, today, lenient, logBlock: o\.logBlock \}\);/.test(create));
-  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient \}\)/.test(create));
+  assert.ok(/const text = habitTemplate\(input, \{ nowIso, today, lenient, linkFolder, logBlock: o\.logBlock \}\);/.test(create));
+  assert.ok(/habitFrontmatterOf\(input, \{ nowIso, today, lenient, linkFolder \}\)/.test(create));
   assert.ok(!/monthDayOf\(f\.month_day\) \|\| 1/.test(main), 'the import mapping never seeds the 1st');
   // applyHabitCadence may still seed the 1st on a person's cadence switch (that is the person choosing monthly, not an import)
   assert.equal(T.applyHabitCadence({ cadence: 'weekly', cadence_days: ['mon'] }, 'monthly').month_day, 1);
