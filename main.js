@@ -5812,16 +5812,20 @@ function qualifyFrontmatterLink(text, key, folder) {
 // Pure: `plannerHabits` are the parsed planner notes, `sourceNotes` the
 // { path, fm } of the My Life room, `folders` the two settings. An empty
 // result is the steady state, which is how "a second run changes nothing"
-// is read off the plan rather than off the disk.
+// is read off the plan rather than off the disk. Each row carries the bare
+// `target` it would qualify, so the caller can ask the vault whether that
+// note is actually in the folder before naming it.
 function qualifyLinkPlan(plannerHabits, sourceNotes, folders) {
   const f = folders || {};
   const out = [];
-  const bare = (raw) => { const t = wikilinkTarget(raw); return !!t && !t.includes('/'); };
+  const bare = (raw) => { const t = wikilinkTarget(raw); return t && !t.includes('/') ? t : null; };
   for (const h of plannerHabits || []) {
-    if (h && h.path && bare(h.linkedNote)) out.push({ path: h.path, field: 'linked_note', folder: f.importFolder });
+    const t = h && h.path ? bare(h.linkedNote) : null;
+    if (t) out.push({ path: h.path, field: 'linked_note', folder: f.importFolder, target: t });
   }
   for (const n of sourceNotes || []) {
-    if (n && n.path && importDone(n.fm) && bare(n.fm.planner_habit)) out.push({ path: n.path, field: 'planner_habit', folder: f.plannerFolder });
+    const t = n && n.path && importDone(n.fm) ? bare(n.fm.planner_habit) : null;
+    if (t) out.push({ path: n.path, field: 'planner_habit', folder: f.plannerFolder, target: t });
   }
   return out;
 }
@@ -5857,6 +5861,20 @@ function importSummaryText(r) {
   if (r.skipped) parts.push(`${r.skipped} skipped (linked already)`);
   if (r.failed && r.failed.length) parts.push(`${r.failed.length} failed: ${r.failed.join('; ')}`);
   return `${parts.join(', ')}.`;
+}
+// The Notice when Import is pressed and there is nothing new to take
+// (0.14.1). The tap is still the consent moment, so the one-time link
+// qualification runs first and this says what it did. For a vault whose
+// habits were all imported before 0.14.1 this is the only entry there is.
+// Rows left alone are named only when there are any: a person with none
+// should not have to read about them.
+function qualifySummaryText(r) {
+  const done = (r && r.qualified) || 0;
+  const left = (r && r.left) || 0;
+  const parts = ['Planner: nothing new to import; every habit note in My Life is linked already.'];
+  if (done) parts.push(done === 1 ? '1 habit link now carries its folder.' : `${done} habit links now carry their folder.`);
+  if (left) parts.push(left === 1 ? '1 link left as it was, its note is not in the folder.' : `${left} links left as they were, their notes are not in the folder.`);
+  return parts.join(' ');
 }
 // The settings tab's line under the import folder.
 function importFolderText(folder, n) {
@@ -7584,10 +7602,21 @@ class IcorPlannerPlugin extends Plugin {
   habitsFolder() { return this.paths().habits; }
   habitsImportFolder() { return habitsImportFolderOf(this.settings); }
   openNewHabit() { new NewHabitModal(this.app, this).open(); }
-  openImportHabits(candidates) {
+  // The tap on Import is the consent moment for the one write the planner
+  // makes in the My Life room, and nothing new to take does not make it a
+  // different moment: a vault whose habits were all imported before 0.14.1
+  // has no candidates left, so this is the only place its two bare
+  // cross-links can still be qualified. The Notice says what that did.
+  async openImportHabits(candidates, onDone) {
     const list = candidates || this.importCandidates();
-    if (!list.length) { new Notice('Planner: nothing to import; every habit note in My Life is linked already.'); return; }
-    new ImportHabitsModal(this.app, this, list).open();
+    if (!list.length) {
+      const r = await this.qualifyHabitLinks();
+      new Notice(qualifySummaryText(r));
+      if (r.qualified) this.emitModelChanged();
+      if (onDone) onDone();
+      return;
+    }
+    new ImportHabitsModal(this.app, this, list, onDone).open();
   }
 
   // The planner habit notes, parsed. The folder is flat (one note per
@@ -7766,7 +7795,10 @@ class IcorPlannerPlugin extends Plugin {
   // by construction: the plan only names a note whose value is still
   // folderless, and the text edit refuses anything it does not recognise,
   // so a second run writes nothing.
+  // Returns { qualified, left }: notes whose bytes changed, and rows left
+  // alone because the note the bare link names is not in the folder.
   async qualifyHabitLinks() {
+    const result = { qualified: 0, left: 0 };
     const folders = { importFolder: this.habitsImportFolder(), plannerFolder: this.habitsFolder() };
     const folder = this.app.vault.getAbstractFileByPath(folders.importFolder);
     const sources = (folder instanceof TFolder ? (folder.children || []) : [])
@@ -7782,14 +7814,27 @@ class IcorPlannerPlugin extends Plugin {
       if (!inside) continue;
       const file = this.app.vault.getAbstractFileByPath(row.path);
       if (!(file instanceof TFile)) continue;
+      // A bare link resolves by proximity, so one whose note has moved out
+      // of the folder is still working. Naming the folder would point it at
+      // a path that holds nothing, which is worse than the ambiguity, so the
+      // row is left as it is and counted.
+      const named = this.app.vault.getAbstractFileByPath(`${row.folder}/${row.target}.md`);
+      if (!(named instanceof TFile)) { result.left++; continue; }
       try {
         // A text edit, never Obsidian's frontmatter editor: that one
         // reserialises the block and drops the note's comment lines (0.11.0).
-        await this.app.vault.process(file, (data) => qualifyFrontmatterLink(data, row.field, row.folder));
+        let changed = false;
+        await this.app.vault.process(file, (data) => {
+          const next = qualifyFrontmatterLink(data, row.field, row.folder);
+          changed = next !== data;
+          return next;
+        });
+        if (changed) result.qualified++;
       } catch (e) {
         console.error('icor-planner: could not qualify', row.field, 'on', row.path, e);
       }
     }
+    return result;
   }
 
   // The import, for the chosen candidates. Per note, in this order: the
@@ -11206,7 +11251,9 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       const exists = this.app.vault.getAbstractFileByPath(n.folder) instanceof TFolder;
       const candidates = exists ? this.plugin.importCandidates() : [];
       importFolderSetting.setDesc(exists ? importFolderText(n.folder, candidates.length) : `"${n.folder}" does not exist in this vault.`);
-      if (importBtn) importBtn.setDisabled(!candidates.length);
+      // Enabled whenever the room exists, not only when something is left to
+      // take: pressing it with nothing new still qualifies the links (0.14.1).
+      if (importBtn) importBtn.setDisabled(!exists);
     };
     importFolderSetting.addText((t) => t.setPlaceholder(DEFAULT_SETTINGS.habitsImportFolder).setValue(this.plugin.settings.habitsImportFolder)
       .onChange(async (v) => {
@@ -11222,7 +11269,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
       .addButton((b) => {
         importBtn = b;
         b.setButtonText('Import from My Life')
-          .onClick(() => new ImportHabitsModal(this.app, this.plugin, this.plugin.importCandidates(), () => this.display()).open());
+          .onClick(() => this.plugin.openImportHabits(null, () => this.display()));
       });
     renderImportFolder(this.plugin.settings.habitsImportFolder);
     new Setting(containerEl)
@@ -11337,7 +11384,7 @@ module.exports.__test = {
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
   habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
   importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, importSourceFrontmatterText,
-  importCandidateText, importButtonText, importSummaryText, importFolderText, habitsCountText, trayTabName,
+  importCandidateText, importButtonText, importSummaryText, qualifySummaryText, importFolderText, habitsCountText, trayTabName,
   IMPORT_EDITS_TEXT, importDone, adoptLogBlock, qualifyFrontmatterLink, qualifyLinkPlan,
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
