@@ -6,6 +6,26 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.14.1] - 2026-09-16
+
+### Fixed
+- **A habit lives in two notes: the one in My Life, where you write about
+  it, and the one in the planner, where its schedule and its check-ins
+  live.** Both notes have the same name, which is the point, but it meant
+  the links between them said only the name and not which note they meant.
+  Obsidian then guessed, and guessed wrong: Open linked note in the planner
+  opened the planner note you were already on, and anything scanning your
+  vault read the My Life note as unlinked. Both links now carry the full
+  path, taken from the two folders you set, so each one names exactly one
+  note. Your existing habits are fixed the next time you run the import:
+  each link is rewritten once, nothing else in the note is touched, your
+  comments and your text stay exactly as they were, and a link that already
+  carries a path is left alone. If there is nothing new to import, pressing
+  Import in the plugin settings still fixes the existing links and tells you
+  how many; a link whose note is not in the folder is left as it was.
+
+  Reported by Brian Carroll in the bug-reports channel.
+
 ## [0.14.0] - 2026-09-15
 
 ### Added
