@@ -306,7 +306,7 @@ test('SOURCE GUARD: no writer of the two habit cross-links can emit a folderless
   assert.match(imp, /await this\.qualifyHabitLinks\(\);/, 'the one-time rewrite runs inside the consented write window');
   assert.match(imp, /const plannerLink = wikilinkTarget\(path\);/);
   assert.match(imp, /importSourceFrontmatterText\(data, plannerLink\)/, 'the back-link gets a path');
-  assert.match(imp, /moveHabitLog\(data, slug\)/, 'the body pointer keeps the short name it always had');
+  assert.match(imp, /moveHabitLog\(data, plannerLink\)/, 'the body pointer takes the same path (0.14.2)');
 
   // No writer of these two fields composes a link from a name any more.
   const writers = [
@@ -332,6 +332,147 @@ test('SOURCE GUARD: no writer of the two habit cross-links can emit a folderless
   const qualify = slice('  async qualifyHabitLinks(', '  // The import, for the chosen candidates.');
   assert.doesNotMatch(qualify, /processFrontMatter/, 'never the frontmatter editor on a note with comments');
   assert.match(qualify, /vault\.process\(/);
+});
+
+/* ---- the body pointer line (0.14.2) -------------------------------------- */
+
+/* The one line the My Life note keeps where its log table was reads
+ *   Schedule and check-ins: [[Walk]]
+ * and carries the very ambiguity 0.14.1 took out of the two frontmatter
+ * fields. From the My Life room a bare [[Walk]] resolves by proximity to
+ * the My Life note the line sits in, so the one link a person actually
+ * clicks was the one link still pointing at itself. It carries the planner
+ * folder now, built from the same setting the frontmatter writer reads.
+ *
+ * The line every note written before this release carries is still read as
+ * a pointer, so no note gains a second one, and the one-time rewrite that
+ * runs at the top of an import qualifies it in place.
+ */
+
+test('THE ASK: a fresh point writes the qualified line', () => {
+  assert.equal(T.habitPointerLine(`${PL}/Walk`), `Schedule and check-ins: [[${PL}/Walk]]`);
+  const bare = '---\ncadence: daily\n---\n\n# Walk\n';
+  assert.equal(T.moveHabitLog(bare, `${PL}/Walk`), `${bare}\nSchedule and check-ins: [[${PL}/Walk]]\n`);
+  assert.equal(T.moveHabitLog('', `${PL}/Walk`), `Schedule and check-ins: [[${PL}/Walk]]\n`);
+  // and in place of a log block, the same line, the rest byte for byte
+  const withBlock = '---\ncadence: daily\n---\n\n# Walk\n\n## Log\n<!-- habit-log: -->\n\n# tail\n';
+  const after = T.moveHabitLog(withBlock, `${PL}/Walk`);
+  assert.equal(after, withBlock.replace('<!-- habit-log: -->', `Schedule and check-ins: [[${PL}/Walk]]`));
+  assert.equal(T.habitLogBlockOf(after), null, 'the block is gone from the source');
+});
+
+test('THE ASK: a note pointed the old bare way is recognised and never pointed twice', () => {
+  const old = '---\ntype: habit\n---\n\n# Walk\n\nSchedule and check-ins: [[Walk]]\n';
+  assert.equal(T.moveHabitLog(old, `${PL}/Walk`), old, 'the bare line it already carries counts as pointed');
+  const now = `---\ntype: habit\n---\n\n# Walk\n\nSchedule and check-ins: [[${PL}/Walk]]\n`;
+  assert.equal(T.moveHabitLog(now, `${PL}/Walk`), now, 'and so does the qualified one');
+  // a pointer at ANOTHER habit is not this habit's pointer
+  const other = `---\ntype: habit\n---\n\n# Walk\n\nSchedule and check-ins: [[${PL}/Pages]]\n`;
+  assert.equal(T.moveHabitLog(other, `${PL}/Walk`), `${other}\nSchedule and check-ins: [[${PL}/Walk]]\n`);
+  // the reader, on its own: both shapes, nothing else
+  assert.equal(T.habitPointerTargetOf('Schedule and check-ins: [[Walk]]'), 'Walk');
+  assert.equal(T.habitPointerTargetOf(`Schedule and check-ins: [[${PL}/Walk]]\r`), `${PL}/Walk`);
+  assert.equal(T.habitPointerTargetOf('Schedule and check-ins: [[Walk]] and more'), null);
+  assert.equal(T.habitPointerTargetOf('Schedule and check-ins: [[Walk|the walk]]'), null);
+  assert.equal(T.habitPointerTargetOf('# Walk'), null);
+  assert.equal(T.habitPointerTargetOf(null), null);
+});
+
+test('THE ASK: the one-time rewrite qualifies the bare pointer line once, and a second run writes nothing', () => {
+  const before = [
+    '---',
+    'type: habit',
+    `planner_habit: "[[${PL}/Walk]]"   # qualified in 0.14.1`,
+    '---',
+    '',
+    '# Walk',
+    '',
+    'Schedule and check-ins: [[Walk]]',
+    '',
+    'Some prose that mentions [[Walk]] and must not move.',
+    '',
+  ].join('\n');
+  const once = T.qualifyHabitPointer(before, PL);
+  assert.equal(once, before.replace('Schedule and check-ins: [[Walk]]', `Schedule and check-ins: [[${PL}/Walk]]`));
+  assert.equal(T.qualifyHabitPointer(once, PL), once, 'idempotent: a second run is a no-op');
+  assert.equal(once.split('\n').length, before.split('\n').length, 'no line added, none removed');
+  assert.ok(once.includes('Some prose that mentions [[Walk]] and must not move.'), 'a link that is not the pointer is not the pointer');
+  assert.ok(once.includes(`planner_habit: "[[${PL}/Walk]]"   # qualified in 0.14.1`), 'the frontmatter and its comment stay');
+  // CRLF survives
+  const crlf = before.replace(/\n/g, '\r\n');
+  assert.equal(T.qualifyHabitPointer(crlf, PL), once.replace(/\n/g, '\r\n'));
+});
+
+test('THE ASK: a qualified pointer line is never touched, and neither is a shape we do not read', () => {
+  for (const text of [
+    `Schedule and check-ins: [[${PL}/Walk]]\n`,          // already qualified
+    'Schedule and check-ins: [[Walk]] # a note to self\n', // a shape we do not parse
+    'Schedule and check-ins: [[Walk|the walk]]\n',         // an alias we do not rewrite blind
+    'Schedule and check-ins:\n',                           // no link at all
+    'schedule and check-ins: [[Walk]]\n',                  // not the sentence
+    '# Walk\n\nno pointer at all\n',
+    '',
+  ]) assert.equal(T.qualifyHabitPointer(text, PL), text, `left alone: ${JSON.stringify(text)}`);
+  assert.equal(T.qualifyHabitPointer('---\nSchedule and check-ins: [[Walk]]\n---\n', PL),
+    '---\nSchedule and check-ins: [[Walk]]\n---\n', 'the frontmatter block is not the body');
+  assert.equal(T.qualifyHabitPointer('Schedule and check-ins: [[Walk]]\n', ''), 'Schedule and check-ins: [[Walk]]\n', 'no folder to add: nothing to write');
+});
+
+test('THE ASK: the plan names a bare pointer, and only for a note whose body it was given', () => {
+  const rows = T.qualifyLinkPlan([], [
+    { path: `${MY}/Walk.md`, fm: { planner_habit: `[[${PL}/Walk]]` }, body: '# Walk\n\nSchedule and check-ins: [[Walk]]\n' },
+    { path: `${MY}/Pages.md`, fm: { planner_habit: `[[${PL}/Pages]]` }, body: `# Pages\n\nSchedule and check-ins: [[${PL}/Pages]]\n` },
+    { path: `${MY}/Old.md`, fm: { planner_habit: '[[Old]]' }, body: '# Old\n\nSchedule and check-ins: [[Old]]\n' },
+    { path: `${MY}/Unread.md`, fm: { planner_habit: `[[${PL}/Unread]]` } },
+    { path: `${MY}/New.md`, fm: { cadence: 'daily' }, body: 'Schedule and check-ins: [[New]]\n' },
+  ], { importFolder: MY, plannerFolder: PL });
+  assert.deepEqual(rows, [
+    { path: `${MY}/Walk.md`, field: 'pointer', folder: PL, target: 'Walk' },
+    { path: `${MY}/Old.md`, field: 'planner_habit', folder: PL, target: 'Old' },
+    { path: `${MY}/Old.md`, field: 'pointer', folder: PL, target: 'Old' },
+  ], 'a qualified pointer is nothing to do; a note that was never imported is not ours to edit');
+});
+
+test('THE ASK: pressing Import rewrites the bare pointer line once, and the press after it writes nothing', async () => {
+  const { p, files, calls } = qualifiedApp();
+  files[`${MY}/Old.md`].text = '---\ntype: habit\nplanner_habit: "[[Old]]"\n---\n\n# Old\n\nSchedule and check-ins: [[Old]]\n';
+  await p.openImportHabits();
+  assert.ok(files[`${MY}/Old.md`].text.includes(`\nSchedule and check-ins: [[${PL}/Old]]\n`), 'the pointer carries the folder now');
+  assert.equal(files[`${MY}/Old.md`].fm.planner_habit, `[[${PL}/Old]]`);
+  assert.equal(files[`${PL}/Old.md`].fm.linked_note, `[[${MY}/Old]]`);
+  assert.deepEqual(calls.process, [`${PL}/Old.md`, `${MY}/Old.md`, `${MY}/Old.md`], 'the back-link and the pointer, one write each');
+  assert.ok(files[`${MY}/Old.md`].text.startsWith('---\ntype: habit\n'), 'nothing else in the note moved');
+  // and the press after it is a no-op, because the plan is empty now
+  p.habits = [T.habitFromFrontmatter(files[`${PL}/Old.md`].fm, `${PL}/Old.md`, files[`${PL}/Old.md`].text)];
+  calls.process.length = 0;
+  await p.openImportHabits();
+  assert.deepEqual(calls.process, [], 'a qualified note is left alone');
+});
+
+test('THE ASK: a pointer whose planner note is not in the folder is left exactly as it was', async () => {
+  const { p, files, calls } = qualifiedApp();
+  // imported, its frontmatter already qualified, but the note the bare
+  // pointer names is not in the planner room
+  files[`${MY}/Old.md`].text = `---\ntype: habit\nplanner_habit: "[[${PL}/Old]]"\n---\n\n# Old\n\nSchedule and check-ins: [[Elsewhere]]\n`;
+  files[`${MY}/Old.md`].fm = { type: 'habit', planner_habit: `[[${PL}/Old]]` };
+  const before = files[`${MY}/Old.md`].text;
+  const r = await p.qualifyHabitLinks();
+  assert.equal(files[`${MY}/Old.md`].text, before, 'a bare pointer that still resolves by proximity keeps working');
+  assert.ok(!calls.process.includes(`${MY}/Old.md`), 'and no write was attempted on it');
+  assert.deepEqual(r, { qualified: 1, left: 1 }, 'the planner note is qualified; the pointer is counted, not guessed at');
+});
+
+test('SOURCE GUARD: the pointer sentence is built in one place', () => {
+  assert.equal(main.split('Schedule and check-ins').length - 1, 1, 'written once; a second literal is a second truth');
+  assert.match(main, /const HABIT_POINTER_PREFIX = 'Schedule and check-ins: ';/);
+  assert.match(main, /function habitPointerLine\(plannerTarget\) \{ return `\$\{HABIT_POINTER_PREFIX\}\[\[\$\{plannerTarget\}\]\]`; \}/,
+    'the one writer, and it takes a TARGET, never a name it would have to guess a folder for');
+  const imp = slice('  async importHabits(', '  /* ---- manual items');
+  assert.match(imp, /moveHabitLog\(data, plannerLink\)/, 'the import hands the pointer the planner note path');
+  assert.doesNotMatch(imp, /const slug = basenameOf\(path\);/, 'the body pointer no longer carries the short name');
+  const qualify = slice('  async qualifyHabitLinks(', '  // The import, for the chosen candidates.');
+  assert.match(qualify, /qualifyHabitPointer\(data, row\.folder\)/, 'and the one-time rewrite reaches the body line too');
+  assert.doesNotMatch(qualify, /processFrontMatter/, 'never the frontmatter editor on a note with comments');
 });
 
 /* ---- fakes --------------------------------------------------------------- */

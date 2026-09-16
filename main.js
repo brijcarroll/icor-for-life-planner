@@ -5664,8 +5664,52 @@ function importPlan(notes, plannerHabits) {
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
-// The one line the My Life note keeps where its log table was.
-function habitPointerLine(plannerSlug) { return `Schedule and check-ins: [[${plannerSlug}]]`; }
+// The one line the My Life note keeps where its log table was, and the one
+// place its sentence is written. The link carries the planner folder for
+// the same reason the two frontmatter fields do (0.14.1): a habit lives in
+// two notes that share a name, a bare [[X]] resolves by proximity, and from
+// the My Life room proximity is the My Life note the line sits in, so the
+// one link a person actually clicks was the one still pointing at itself.
+// `plannerTarget` is the planner note's TARGET (its path without the
+// extension), never a bare name this would have to guess a folder for.
+const HABIT_POINTER_PREFIX = 'Schedule and check-ins: ';
+function habitPointerLine(plannerTarget) { return `${HABIT_POINTER_PREFIX}[[${plannerTarget}]]`; }
+// The target a pointer line names, or null when the line is not one. BOTH
+// shapes are read: the bare [[Walk]] every note pointed before 0.14.2
+// carries, and the qualified [[02 Planner/Habits/Walk]] written now. Only
+// the shape this file writes is recognised; an alias, a heading or anything
+// after the link is a line a person shaped by hand, and it is left to them.
+const HABIT_POINTER_LINK_RE = /^\[\[([^\]|#]+)\]\]$/;
+function habitPointerTargetOf(line) {
+  const s = String(line == null ? '' : line).replace(/\r$/, '');
+  if (!s.startsWith(HABIT_POINTER_PREFIX)) return null;
+  const m = HABIT_POINTER_LINK_RE.exec(s.slice(HABIT_POINTER_PREFIX.length));
+  return m ? wikilinkTarget(m[1]) : null;
+}
+// The index of the first BODY line: past the frontmatter fence when the note
+// opens with one, else zero. The pointer is prose a person reads, and its
+// sentence happens to have the shape of a YAML key, so the block is skipped
+// rather than searched.
+function bodyStartIndex(lines) {
+  if (!(lines.length > 1 && lines[0].replace(/\r$/, '') === '---')) return 0;
+  for (let i = 1; i < lines.length; i++) if (lines[i].replace(/\r$/, '') === '---') return i + 1;
+  return 0;
+}
+// Does this note already point at the habit `plannerTarget` names? A bare
+// line counts, so a note pointed before 0.14.2 never gains a second one; a
+// qualified line naming ANOTHER note does not, because it means another
+// habit. This is the import's idempotency check.
+function habitHasPointer(body, plannerTarget) {
+  const want = wikilinkTarget(plannerTarget);
+  if (!want) return false;
+  const short = want.split('/').pop();
+  const lines = splitLogLines(String(body == null ? '' : body));
+  for (let i = bodyStartIndex(lines); i < lines.length; i++) {
+    const t = habitPointerTargetOf(lines[i]);
+    if (t && (t === want || t === short)) return true;
+  }
+  return false;
+}
 // The sentinel block of a note: the sentinel line through the last table
 // row, byte for byte (line endings included), or null without one.
 function habitLogBlockOf(body) {
@@ -5678,12 +5722,12 @@ function habitLogBlockOf(body) {
 // pointer line; a note with no block gets the pointer at its end; a note
 // that already carries the pointer and no block is left as it is. Every
 // other byte stays.
-function moveHabitLog(body, plannerSlug) {
+function moveHabitLog(body, plannerTarget) {
   const text = String(body == null ? '' : body);
-  const pointer = habitPointerLine(plannerSlug);
+  const pointer = habitPointerLine(plannerTarget);
   const parsed = parseLogTable(text, HABIT_LOG_SENTINEL);
   if (!parsed.found) {
-    if (text.includes(pointer)) return text;
+    if (habitHasPointer(text, plannerTarget)) return text;
     const eol = text.includes('\r\n') ? '\r\n' : '\n';
     let base = text;
     if (base.length && !base.endsWith('\n')) base += eol;
@@ -5808,6 +5852,25 @@ function qualifyFrontmatterLink(text, key, folder) {
   return src;
 }
 
+// The My Life note's pointer line, qualified to the planner folder. One
+// line, as a TEXT edit, the same discipline the frontmatter rewrite has: no
+// other line is looked at, the frontmatter block is not entered, and a
+// pointer that already names a folder is authority and passes through, which
+// is what makes a second run a no-op.
+function qualifyHabitPointer(text, folder) {
+  const src = String(text == null ? '' : text);
+  const lines = src.split('\n');
+  for (let i = bodyStartIndex(lines); i < lines.length; i++) {
+    const target = habitPointerTargetOf(lines[i]);
+    if (!target || target.includes('/')) continue;
+    const qualified = qualifyLinkTarget(target, folder);
+    if (!qualified || qualified === target) return src;
+    lines[i] = habitPointerLine(qualified) + (lines[i].endsWith('\r') ? '\r' : '');
+    return lines.join('\n');
+  }
+  return src;
+}
+
 // Which notes still carry a folderless cross-link, and what each one needs.
 // Pure: `plannerHabits` are the parsed planner notes, `sourceNotes` the
 // { path, fm } of the My Life room, `folders` the two settings. An empty
@@ -5824,8 +5887,20 @@ function qualifyLinkPlan(plannerHabits, sourceNotes, folders) {
     if (t) out.push({ path: h.path, field: 'linked_note', folder: f.importFolder, target: t });
   }
   for (const n of sourceNotes || []) {
-    const t = n && n.path && importDone(n.fm) ? bare(n.fm.planner_habit) : null;
+    if (!n || !n.path || !importDone(n.fm)) continue;
+    const t = bare(n.fm.planner_habit);
     if (t) out.push({ path: n.path, field: 'planner_habit', folder: f.plannerFolder, target: t });
+    // The body pointer, the same question one line lower. It lives in the
+    // text, so a note whose `body` was not read cannot answer it and no row
+    // is emitted for it; the caller decides whose body is worth reading.
+    if (n.body == null) continue;
+    const lines = splitLogLines(String(n.body));
+    for (let i = bodyStartIndex(lines); i < lines.length; i++) {
+      const p = habitPointerTargetOf(lines[i]);
+      if (!p || p.includes('/')) continue;
+      out.push({ path: n.path, field: 'pointer', folder: f.plannerFolder, target: p });
+      break;
+    }
   }
   return out;
 }
@@ -7801,9 +7876,15 @@ class IcorPlannerPlugin extends Plugin {
     const result = { qualified: 0, left: 0 };
     const folders = { importFolder: this.habitsImportFolder(), plannerFolder: this.habitsFolder() };
     const folder = this.app.vault.getAbstractFileByPath(folders.importFolder);
-    const sources = (folder instanceof TFolder ? (folder.children || []) : [])
-      .filter((c) => c instanceof TFile && c.extension === 'md')
-      .map((f) => ({ path: f.path, fm: (this.app.metadataCache.getFileCache(f) || {}).frontmatter }));
+    const sources = [];
+    for (const c of (folder instanceof TFolder ? (folder.children || []) : [])) {
+      if (!(c instanceof TFile) || c.extension !== 'md') continue;
+      const fm = (this.app.metadataCache.getFileCache(c) || {}).frontmatter;
+      // Only a note that has been imported can carry a pointer line, and only
+      // its text can say whether that line still lacks the folder, so the body
+      // of exactly those notes is read. cachedRead: Obsidian already holds it.
+      sources.push({ path: c.path, fm, body: importDone(fm) ? await this.app.vault.cachedRead(c) : null });
+    }
     for (const row of qualifyLinkPlan(this.habits || [], sources, folders)) {
       // The same boundary every other write has: the planner room for the
       // planner note, the import room for the My Life note, checked before
@@ -7825,7 +7906,9 @@ class IcorPlannerPlugin extends Plugin {
         // reserialises the block and drops the note's comment lines (0.11.0).
         let changed = false;
         await this.app.vault.process(file, (data) => {
-          const next = qualifyFrontmatterLink(data, row.field, row.folder);
+          const next = row.field === 'pointer'
+            ? qualifyHabitPointer(data, row.folder)
+            : qualifyFrontmatterLink(data, row.field, row.folder);
           changed = next !== data;
           return next;
         });
@@ -7872,16 +7955,15 @@ class IcorPlannerPlugin extends Plugin {
         } else {
           path = await this.createHabit(c, { logBlock, quiet: true, lenient: true });
         }
-        // Two readings of the planner note, on purpose. The BODY pointer
-        // keeps the short name it has always had: it is prose a person
-        // reads, it sits in a note that has no same-named neighbour, and
-        // changing it would make an already-pointed note look unpointed and
-        // gain a second line. The FRONTMATTER back-link takes the path,
-        // because that field is read by machines and must name one file.
-        const slug = basenameOf(path);
+        // One reading of the planner note, its PATH, for both writes
+        // (0.14.2). The body pointer used to keep the short name, on the
+        // reasoning that it is prose a person reads; but it is prose that
+        // names a file, and from the My Life room a bare name resolves to
+        // the note the line sits in. A note pointed the old way is still
+        // recognised as pointed, so it never gains a second line.
         const plannerLink = wikilinkTarget(path);
-        if (logBlock || !body.includes(habitPointerLine(slug))) {
-          await this.app.vault.process(src, (data) => moveHabitLog(data, slug));
+        if (logBlock || !habitHasPointer(body, plannerLink)) {
+          await this.app.vault.process(src, (data) => moveHabitLog(data, plannerLink));
         }
         // A text edit, never Obsidian's frontmatter editor (which would
         // rewrite the block and drop its comment lines). The metadata
@@ -11383,9 +11465,10 @@ module.exports.__test = {
   basenameOf, wikilinkBasename, wikilinkTarget, wikilinkOf, qualifyLinkTarget, linkedFileOf, habitFromFrontmatter,
   daysFromCadence, habitDays, dayOfMonth, habitLandsOn, habitScheduleOf, streakOf, habitRowState, habitOccurrences,
   habitLogAfterCheck, habitRowModel, applyHabitCadence, validateHabitInput, habitFrontmatterOf, habitTemplate,
-  importMapping, importPlan, habitPointerLine, habitLogBlockOf, moveHabitLog, importSourceFrontmatterText,
+  importMapping, importPlan, HABIT_POINTER_PREFIX, habitPointerLine, habitPointerTargetOf, habitHasPointer,
+  habitLogBlockOf, moveHabitLog, importSourceFrontmatterText,
   importCandidateText, importButtonText, importSummaryText, qualifySummaryText, importFolderText, habitsCountText, trayTabName,
-  IMPORT_EDITS_TEXT, importDone, adoptLogBlock, qualifyFrontmatterLink, qualifyLinkPlan,
+  IMPORT_EDITS_TEXT, importDone, adoptLogBlock, qualifyFrontmatterLink, qualifyHabitPointer, qualifyLinkPlan,
   SOURCES, DEFAULT_SETTINGS,
   SECRET_KEY_PREFIX, SECRET_FIELDS, secretKey, fieldSecretKey, calendarSecretKey, secretStorageUsable, SecretVault,
   feedUrl, setFeedUrl, forgetFeedSecret, readSecret, writeSecret, migrateSecrets, withSecrets, adoptSettings, secretsNoteText,

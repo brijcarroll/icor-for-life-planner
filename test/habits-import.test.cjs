@@ -54,7 +54,7 @@ const MY_NOTE = [
 // the schedule lines and the start date gone from the frontmatter, the
 // type and the back-link at its end, every other byte as it was.
 const MY_NOTE_IMPORTED = MY_NOTE
-  .replace(LOG_BLOCK, 'Schedule and check-ins: [[Morning pages]]')
+  .replace(LOG_BLOCK, `Schedule and check-ins: [[${PL}/Morning pages]]`)
   .replace(
     'cadence: weekly\ncadence_days: [mon, wed, fri]\nstatus: active\nstarted_on: 2026-08-27\nkey_element: "[[Writing]]"\n---',
     `status: active\nkey_element: "[[Writing]]"\ntype: habit\nplanner_habit: "[[${PL}/Morning pages]]"\n---`,
@@ -108,9 +108,9 @@ test('THE ASK: the plan lists only the habit notes no planner note links to yet'
 test('THE ASK: the log block moves byte-exact, the pointer line takes its place, the rest of the note stays', () => {
   const block = T.habitLogBlockOf(MY_NOTE);
   assert.equal(block, LOG_BLOCK, 'the sentinel line through the last row, nothing more');
-  const after = T.moveHabitLog(MY_NOTE, 'Morning pages');
-  assert.equal(after, MY_NOTE.replace(LOG_BLOCK, 'Schedule and check-ins: [[Morning pages]]'), 'one line in place of the block; every other byte stays');
-  assert.equal(T.habitPointerLine('Morning pages'), 'Schedule and check-ins: [[Morning pages]]');
+  const after = T.moveHabitLog(MY_NOTE, `${PL}/Morning pages`);
+  assert.equal(after, MY_NOTE.replace(LOG_BLOCK, `Schedule and check-ins: [[${PL}/Morning pages]]`), 'one line in place of the block; every other byte stays');
+  assert.equal(T.habitPointerLine(`${PL}/Morning pages`), `Schedule and check-ins: [[${PL}/Morning pages]]`);
   assert.equal(T.habitLogBlockOf(after), null, 'the block is gone from the source');
   // the planner note carries the block verbatim in its own log section
   const planner = T.habitTemplate({ name: 'Morning pages', cadence: 'weekly', cadenceDays: ['mon', 'wed', 'fri'], startedOn: '2026-08-27', linkedNote: 'Morning pages' },
@@ -122,16 +122,16 @@ test('THE ASK: the log block moves byte-exact, the pointer line takes its place,
   assert.equal(T.logRowFor(T.parseLogTable(planner, 'habit-log'), '2026-09-03').marker, '✓', 'a hand-written marker survives the move');
   // CRLF: the block keeps its endings and the pointer takes the block's
   const crlf = MY_NOTE.replace(/\n/g, '\r\n');
-  const crlfAfter = T.moveHabitLog(crlf, 'Morning pages');
-  assert.ok(crlfAfter.includes('Schedule and check-ins: [[Morning pages]]\r\n'));
+  const crlfAfter = T.moveHabitLog(crlf, `${PL}/Morning pages`);
+  assert.ok(crlfAfter.includes(`Schedule and check-ins: [[${PL}/Morning pages]]\r\n`));
   assert.equal(T.habitLogBlockOf(crlf), `${LOG_BLOCK.replace(/\n/g, '\r\n')}\r`, 'the last line keeps its return too');
   assert.ok(T.habitTemplate({ name: 'x', cadence: 'daily' }, { nowIso: 'x', logBlock: T.habitLogBlockOf(crlf) }).includes(`${LOG_BLOCK.replace(/\n/g, '\r\n')}\r\n`), 'and the planner note carries the endings as they were');
   // no block: the pointer is appended; already there: nothing changes
   const bare = '---\ncadence: daily\n---\n\n# Walk\n';
-  const appended = T.moveHabitLog(bare, 'Walk');
-  assert.equal(appended, `${bare}\nSchedule and check-ins: [[Walk]]\n`);
-  assert.equal(T.moveHabitLog(appended, 'Walk'), appended, 'idempotent');
-  assert.equal(T.moveHabitLog('', 'Walk'), 'Schedule and check-ins: [[Walk]]\n');
+  const appended = T.moveHabitLog(bare, `${PL}/Walk`);
+  assert.equal(appended, `${bare}\nSchedule and check-ins: [[${PL}/Walk]]\n`);
+  assert.equal(T.moveHabitLog(appended, `${PL}/Walk`), appended, 'idempotent');
+  assert.equal(T.moveHabitLog('', `${PL}/Walk`), `Schedule and check-ins: [[${PL}/Walk]]\n`);
   // a sentinel with no table yet moves as one line
   assert.equal(T.habitLogBlockOf('## Log\n<!-- habit-log: -->\n\n# tail\n'), '<!-- habit-log: -->');
 });
@@ -312,7 +312,7 @@ test('THE ASK: the import creates the planner note first, then edits the My Life
   // the My Life notes: the pointer in place of the block, the fields gone
   assert.equal(files[`${MY}/Morning pages.md`].text, MY_NOTE_IMPORTED);
   assert.deepEqual(files[`${MY}/Morning pages.md`].fm, { name: 'Morning pages', status: 'active', key_element: '[[Writing]]', type: 'habit', planner_habit: `[[${PL}/Morning pages]]` }, 'a lived-vault note gains its type and the back-link');
-  assert.equal(files[`${MY}/Walk.md`].text, `---\ntype: habit\nplanner_habit: "[[${PL}/Walk]]"\n---\n\n# Walk\n\nSchedule and check-ins: [[Walk]]\n`, 'the type it had stays where it was; cadence and since are gone; the back-link is a path, the body pointer the short name it always had');
+  assert.equal(files[`${MY}/Walk.md`].text, `---\ntype: habit\nplanner_habit: "[[${PL}/Walk]]"\n---\n\n# Walk\n\nSchedule and check-ins: [[${PL}/Walk]]\n`, 'the type it had stays where it was; cadence and since are gone; both the back-link and the body pointer are paths (0.14.2)');
   assert.deepEqual(files[`${MY}/Walk.md`].fm, { type: 'habit', planner_habit: `[[${PL}/Walk]]` }, 'since is gone: the date lives once, in the planner note');
   // the order per note: create, then the body, then the frontmatter, both
   // through vault.process on the My Life note only; processFrontMatter is
@@ -363,11 +363,11 @@ test('SOURCE: the candidate line, the settings line, and the import runs lenient
   const imp = main.slice(main.indexOf('async importHabits('), main.indexOf('/* ---- manual items'));
   assert.ok(/const body = await this\.app\.vault\.read\(src\);\s*\n\s*const logBlock = habitLogBlockOf\(body\);/.test(imp), 'the block is read before the planner note is made');
   assert.ok(/path = await this\.createHabit\(c, \{ logBlock, quiet: true, lenient: true \}\);/.test(imp), 'created first, lenient');
-  assert.ok(/await this\.app\.vault\.process\(src, \(data\) => moveHabitLog\(data, slug\)\);/.test(imp), 'then the body, through vault.process');
+  assert.ok(/await this\.app\.vault\.process\(src, \(data\) => moveHabitLog\(data, plannerLink\)\);/.test(imp), 'then the body, through vault.process');
   assert.ok(/const plannerLink = wikilinkTarget\(path\);/.test(imp), 'the planner note is named by its path, because the two notes of a habit share a basename');
   assert.ok(/await this\.app\.vault\.process\(src, \(data\) => importSourceFrontmatterText\(data, plannerLink\)\);/.test(imp), 'then the frontmatter, as a text edit through vault.process: the strip, the type and the back-link in one pass');
   assert.ok(!/processFrontMatter/.test(imp), 'processFrontMatter never touches the My Life note: it would drop its comment lines');
-  assert.ok(imp.indexOf('createHabit(') < imp.indexOf('moveHabitLog(data, slug)') && imp.indexOf('moveHabitLog(data, slug)') < imp.indexOf('importSourceFrontmatterText(data, plannerLink)'), 'in that order');
+  assert.ok(imp.indexOf('createHabit(') < imp.indexOf('moveHabitLog(data, plannerLink)') && imp.indexOf('moveHabitLog(data, plannerLink)') < imp.indexOf('importSourceFrontmatterText(data, plannerLink)'), 'in that order');
   assert.ok(/if \(importDone\(cache && cache\.frontmatter\)\) \{ result\.skipped\+\+; continue; \}/.test(imp), 'done is read on the source');
   assert.ok(!/linkedBasename/.test(imp), 'never inferred from the planner side');
   // the consent copy: one constant, both surfaces
@@ -394,7 +394,7 @@ test('THE ASK: a run that stops after the body write resumes with the frontmatte
   assert.deepEqual(r1, { done: 0, skipped: 0, failed: ['Morning pages: disk full'] });
   assert.equal(calls.create.length, 1, 'the planner note exists');
   assert.equal(T.habitLogBlockOf(files[`${MY}/Morning pages.md`].text), null, 'the body was written: the block is out');
-  assert.ok(files[`${MY}/Morning pages.md`].text.includes('Schedule and check-ins: [[Morning pages]]'));
+  assert.ok(files[`${MY}/Morning pages.md`].text.includes(`Schedule and check-ins: [[${PL}/Morning pages]]`));
   assert.equal(files[`${MY}/Morning pages.md`].fm.cadence, 'weekly', 'the frontmatter was not');
   // the note is listed again, with the planner note that links back
   const again = p.importCandidates();
