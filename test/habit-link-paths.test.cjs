@@ -150,9 +150,11 @@ test('THE ASK: the plan names every bare cross-link and nothing else, and emptie
     ],
     { importFolder: MY, plannerFolder: PL },
   );
+  // each row also carries the bare name it would qualify, so the writer can
+  // ask the vault whether that note is in the folder before naming it
   assert.deepEqual(plan, [
-    { path: `${PL}/Walk.md`, field: 'linked_note', folder: MY },
-    { path: `${MY}/Walk.md`, field: 'planner_habit', folder: PL },
+    { path: `${PL}/Walk.md`, field: 'linked_note', folder: MY, target: 'Walk' },
+    { path: `${MY}/Walk.md`, field: 'planner_habit', folder: PL, target: 'Walk' },
   ]);
   assert.deepEqual(T.qualifyLinkPlan([], [], { importFolder: MY, plannerFolder: PL }), [], 'nothing bare, nothing to do');
   assert.deepEqual(T.qualifyLinkPlan(null, null, null), []);
@@ -175,6 +177,72 @@ test('THE ASK: the import rewrites a bare pair once, writes each note once, and 
   calls.process.length = 0;
   await p.importHabits([]);
   assert.deepEqual(calls.process, [], 'a qualified pair is left alone');
+});
+
+/* ---- pressing Import with nothing new to take (0.14.1) ------------------- */
+
+/* The rewrite only ever ran at the top of an import, and an import could
+ * only be started while there was a note left to take. A vault whose habits
+ * were ALL imported before 0.14.1 therefore had no way to reach it and kept
+ * both bare links forever. The tap on Import is the consent moment either
+ * way, so it now runs the rewrite and the Notice says what it did.
+ */
+
+test('THE ASK: Import with no candidates rewrites a bare pair once, and the next press writes nothing', async () => {
+  const { p, files, calls } = qualifiedApp();
+  await p.openImportHabits();
+  assert.equal(files[`${MY}/Old.md`].fm.planner_habit, `[[${PL}/Old]]`);
+  assert.equal(files[`${PL}/Old.md`].fm.linked_note, `[[${MY}/Old]]`);
+  assert.deepEqual(calls.process, [`${PL}/Old.md`, `${MY}/Old.md`], 'one write per note, no more');
+  assert.ok(files[`${MY}/Old.md`].text.endsWith('\n\n# Old\n'), 'the body is untouched');
+  // and the press after it is a no-op, because the plan is empty now
+  p.habits = [T.habitFromFrontmatter(files[`${PL}/Old.md`].fm, `${PL}/Old.md`, files[`${PL}/Old.md`].text)];
+  calls.process.length = 0;
+  await p.openImportHabits();
+  assert.deepEqual(calls.process, [], 'a qualified pair is left alone');
+});
+
+test('THE ASK: a bare link whose note is not in the folder is left exactly as it was', async () => {
+  const { p, files, calls } = qualifiedApp();
+  // the planner side: the My Life note this one names has been moved away
+  files[`${PL}/Moved.md`] = { text: `---\ntype: planner-habit\nname: Moved\ncadence: daily\nlinked_note: "[[Moved]]"\n---\n`, fm: { type: 'planner-habit', name: 'Moved', cadence: 'daily', linked_note: '[[Moved]]' } };
+  // the My Life side: the planner note this one names is gone
+  files[`${MY}/Gone.md`] = { text: '---\ntype: habit\nplanner_habit: "[[Gone]]"\n---\n', fm: { type: 'habit', planner_habit: '[[Gone]]' } };
+  p.habits = Object.keys(files).filter((k) => k.startsWith(`${PL}/`))
+    .map((k) => T.habitFromFrontmatter(files[k].fm, k, files[k].text));
+  const before = { moved: files[`${PL}/Moved.md`].text, gone: files[`${MY}/Gone.md`].text };
+  const r = await p.qualifyHabitLinks();
+  assert.deepEqual(r, { qualified: 2, left: 2 }, 'the pair that can be named is; the two that cannot are counted');
+  assert.equal(files[`${PL}/Moved.md`].text, before.moved, 'a bare link that still resolves by proximity keeps working');
+  assert.equal(files[`${MY}/Gone.md`].text, before.gone);
+  assert.ok(!calls.process.includes(`${PL}/Moved.md`), 'and no write was attempted on it');
+  assert.ok(!calls.process.includes(`${MY}/Gone.md`));
+});
+
+test('THE ASK: the Notice counts what was qualified, and names what was left only when there is any', () => {
+  const nothing = 'Planner: nothing new to import; every habit note in My Life is linked already.';
+  assert.equal(T.qualifySummaryText({ qualified: 0, left: 0 }), nothing);
+  assert.equal(T.qualifySummaryText(), nothing, 'no result is no counts, never "undefined links"');
+  assert.equal(T.qualifySummaryText({ qualified: 4, left: 0 }), `${nothing} 4 habit links now carry their folder.`);
+  assert.equal(T.qualifySummaryText({ qualified: 1, left: 0 }), `${nothing} 1 habit link now carries its folder.`);
+  assert.equal(T.qualifySummaryText({ qualified: 0, left: 1 }), `${nothing} 1 link left as it was, its note is not in the folder.`);
+  assert.equal(T.qualifySummaryText({ qualified: 2, left: 2 }), `${nothing} 2 habit links now carry their folder. 2 links left as they were, their notes are not in the folder.`);
+  for (const text of [nothing, T.qualifySummaryText({ qualified: 4, left: 1 })]) {
+    assert.doesNotMatch(text, /[\u2013\u2014]/, 'no dashes of that kind anywhere in the copy');
+    assert.match(text, /\.$/);
+  }
+});
+
+test('SOURCE GUARD: both Import entries reach the rewrite when there is nothing new to take', () => {
+  const open = slice('  async openImportHabits(', '  // The planner habit notes, parsed.');
+  assert.match(open, /const r = await this\.qualifyHabitLinks\(\);/, 'the empty case runs the rewrite, never just a Notice');
+  assert.match(open, /new Notice\(qualifySummaryText\(r\)\)/, 'and reports what it did');
+  // the settings-tab button is the entry a fully-imported vault has left, so
+  // it goes through the same method and is not disabled for having nothing new
+  const settings = slice("const importFolderSetting = new Setting(containerEl).setName('My Life Habits folder')", "new Setting(containerEl)\n      .setName('Streaks')");
+  assert.match(settings, /importBtn\.setDisabled\(!exists\)/, 'enabled whenever the room exists');
+  assert.doesNotMatch(settings, /importBtn\.setDisabled\(!candidates\.length\)/, 'the bug: no candidates, no way in');
+  assert.match(settings, /onClick\(\(\) => this\.plugin\.openImportHabits\(null, \(\) => this\.display\(\)\)\)/, 'one entry, not a second modal call site');
 });
 
 /* ---- the readers --------------------------------------------------------- */
@@ -291,6 +359,20 @@ function fmOf(text) {
   }
   for (const k of Object.keys(fm)) if (fm[k] === null) delete fm[k];
   return fm;
+}
+
+// The same vault after every habit has been imported: no candidates left,
+// one pair whose two cross-links are still bare. The state a member who
+// imported before 0.14.1 opens the plugin in.
+function qualifiedApp() {
+  const { p, files, calls } = importApp();
+  delete files[`${MY}/Morning pages.md`];
+  delete files[`${MY}/Walk.md`];
+  files[`${MY}/Old.md`] = { text: '---\ntype: habit\nplanner_habit: "[[Old]]"\n---\n\n# Old\n', fm: { type: 'habit', planner_habit: '[[Old]]' } };
+  files[`${PL}/Old.md`] = { text: '---\ntype: planner-habit\nname: Old\ncadence: daily\nlinked_note: "[[Old]]"\n---\n\n# Old\n', fm: { type: 'planner-habit', name: 'Old', cadence: 'daily', linked_note: '[[Old]]' } };
+  p.habits = [T.habitFromFrontmatter(files[`${PL}/Old.md`].fm, `${PL}/Old.md`, files[`${PL}/Old.md`].text)];
+  assert.deepEqual(p.importCandidates(), [], 'the fixture is the fully-imported vault, or the gate proves nothing');
+  return { p, files, calls };
 }
 
 function importApp() {
