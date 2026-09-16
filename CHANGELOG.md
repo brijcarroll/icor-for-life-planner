@@ -6,6 +6,27 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.14.2] - 2026-09-16
+
+### Fixed
+- **The link under a habit note now points where you expect.** Every
+  habit in My Life carries a line reading Schedule and check-ins that
+  takes you to its planner note. Because a habit lives in two notes that
+  share a name by design, that link was ambiguous, and Obsidian resolved
+  it to whichever note was closest, which from My Life meant the note you
+  were already reading. It now carries the full planner path, so it opens
+  the planner note. Notes written before this release are fixed in place
+  the next time you press Import, one line each, once, and nothing else
+  in the note moves. A note that already points somewhere is never
+  pointed a second time, and a pointer whose planner note has been moved
+  out of the planner folder is left exactly as it is, because a link that
+  still works beats a tidier one that does not.
+
+  Reported by Brian Carroll in the bug-reports channel.
+- Housekeeping: the countdown strip toggles a class instead of an inline
+  style, six error handlers say why they swallow, one regex escape
+  removed; behaviour unchanged, pinned by a new source-hygiene test.
+
 ## [0.14.1] - 2026-09-16
 
 ### Fixed
