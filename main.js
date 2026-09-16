@@ -1542,7 +1542,7 @@ function lunchBandHeight(startHM, endHM) {
 // entities decoded. Pure regex (no DOM) so it is headless-testable.
 function htmlishToText(raw) {
   let x = String(raw || '');
-  if (!/<[a-z!\/][^>]*>/i.test(x)) return x;
+  if (!/<[a-z!/][^>]*>/i.test(x)) return x;
   x = x
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/(div|p|li|tr|h[1-6]|ul|ol)>/gi, '\n')
@@ -2882,7 +2882,7 @@ function imapConnect(opts, deps) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { plain.destroy(); } catch {}
+      try { plain.destroy(); } catch { /* already gone: the teardown is best effort */ }
       reject(err);
     };
     const timer = setTimeout(() => abort(new Error('timeout')), 15000);
@@ -2906,7 +2906,7 @@ function imapConnect(opts, deps) {
           plain.removeListener('data', onData);
           plain.removeListener('error', onError);
           let socket;
-          try { socket = secure(plain); } catch (e) { try { plain.destroy(); } catch {} return reject(e); }
+          try { socket = secure(plain); } catch (e) { try { plain.destroy(); } catch { /* already gone: the TLS failure is what we report */ } return reject(e); }
           return resolve({ socket, greeted: true });
         }
       }
@@ -2947,14 +2947,14 @@ function imapSession(opts, user, pass, steps, deps) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (socket) { try { socket.destroy(); } catch {} }
+      if (socket) { try { socket.destroy(); } catch { /* already gone: the failure we report is the one above */ } }
       reject(err);
     };
     const finish = () => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { socket.end(); } catch {}
+      try { socket.end(); } catch { /* already closed: the session succeeded either way */ }
       resolve(ctx);
     };
     const timer = setTimeout(() => fail(new Error('timeout')), 20000);
@@ -2992,7 +2992,7 @@ function imapSession(opts, user, pass, steps, deps) {
       }
     };
     imapConnect(opts, deps).then(({ socket: sock, greeted }) => {
-      if (settled) { try { sock.destroy(); } catch {} return; }
+      if (settled) { try { sock.destroy(); } catch { /* already gone: we timed out before the connect landed */ } return; }
       socket = sock;
       socket.on('data', (chunk) => {
         buffer += chunk.toString('binary');
@@ -6842,7 +6842,7 @@ class IcorPlannerPlugin extends Plugin {
   async ensureFolders() {
     const mk = async (path) => {
       const existing = this.app.vault.getAbstractFileByPath(path);
-      if (!existing) { try { await this.app.vault.createFolder(path); } catch {} }
+      if (!existing) { try { await this.app.vault.createFolder(path); } catch { /* another call got there first, or the vault refuses it: every write checks its own room */ } }
     };
     const p = this.paths();
     await mk(p.root);
@@ -9465,10 +9465,11 @@ class PlannerBoardView extends ItemView {
     this._todayCol.dataset.railState = mins < start ? 'before' : (mins > end ? 'after' : 'on');
     if (this._countdown && this._countdown.wrap.isConnected) {
       const seg = segmentInfo(this.plugin.settings, mins);
-      if (!seg) {
-        this._countdown.wrap.style.display = 'none';
-      } else {
-        this._countdown.wrap.style.display = '';
+      // A class, never an inline display: an inline style is out of reach of
+      // the stylesheet and of a theme, and this element already carries a
+      // display of its own that an inline '' would have to fall back to.
+      this._countdown.wrap.classList.toggle('is-hidden', !seg);
+      if (seg) {
         this._countdown.wrap.dataset.seg = seg.name.toLowerCase();
         this._countdown.fill.style.width = `${Math.round(seg.pct * 100)}%`;
         this._countdown.label.textContent = `${seg.name} \u00b7 ${fmtLeft(seg.leftMin)}`;

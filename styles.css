@@ -914,6 +914,10 @@ a.iplan-event-modal-row-value:hover { color: var(--ink-marker, #ff5a2d); }
   transition: width 400ms var(--iplan-ease);
 }
 .iplan-countdown[data-seg='lunch'] .iplan-countdown-fill { background: var(--iplan-dim); }
+/* outside a named segment the bar has nothing to say, so it is not there.
+ * A class, not an inline display: the same is-hidden idiom the habit modal's
+ * conditional rows use, stated at (0,2,0) so it beats the flex above. */
+.iplan-countdown.is-hidden { display: none; }
 .iplan-countdown-label {
   font-family: var(--iplan-mono);
   text-transform: uppercase;
