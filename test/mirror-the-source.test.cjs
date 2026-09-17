@@ -45,6 +45,7 @@ function note(id, fm) {
     weekly_goal: true, done_local: false, linked_note: '[[chaser]]',
   }, fm || {});
   f.body = '';
+  f.stat = { mtime: 1000, ctime: 1000, size: 0 };
   return f;
 }
 
@@ -57,7 +58,7 @@ function plugin(settings, files) {
     vault: {
       getAbstractFileByPath: (p) => (p === ROOT ? root : (byPath.get(p) || null)),
       cachedRead: async (f) => `${HEAD}${f.body || ''}`,
-      process: async (f, fn) => { f.body = fn(`${HEAD}${f.body || ''}`).replace(/^---\n[\s\S]*?\n---\n?/, ''); },
+      process: async (f, fn) => { f.body = fn(`${HEAD}${f.body || ''}`).replace(/^---\n[\s\S]*?\n---\n?/, ''); f.stat.mtime += 1; },
       create: async () => { throw new Error('no create in these gates'); },
       trash: async (f, system) => {
         assert.equal(system, true, 'the note always goes to the system trash, never the member setting');
@@ -66,7 +67,7 @@ function plugin(settings, files) {
     },
     metadataCache: { getFileCache: (f) => ({ frontmatter: f.fm }) },
     fileManager: {
-      processFrontMatter: async (f, fn) => { fn(f.fm); },
+      processFrontMatter: async (f, fn) => { fn(f.fm); f.stat.mtime += 1; },
       // Present and recording: a gate below proves it is never the one used.
       trashFile: async (f) => { trashed.push(`OBEYS-MEMBER-SETTING:${f.path}`); },
     },

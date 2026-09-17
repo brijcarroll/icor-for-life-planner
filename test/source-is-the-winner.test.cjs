@@ -55,6 +55,10 @@ function note(id, fm) {
     weekly_goal: false, done_local: false, linked_note: null,
   }, fm || {});
   f.body = '';
+  // The adapter reconciles the index before a write resolves, so `stat.mtime`
+  // is the post-write mtime the moment the await returns. The fakes below
+  // bump it on every write, which is the whole of the self-write signal.
+  f.stat = { mtime: 1000, ctime: 1000, size: 0 };
   return f;
 }
 
@@ -72,12 +76,12 @@ function vault(files) {
     vault: {
       getAbstractFileByPath: (p) => (p === ROOT ? root : (byPath.get(p) || null)),
       cachedRead: async (f) => `${HEAD}${f.body || ''}`,
-      process: async (f, fn) => { f.body = fn(`${HEAD}${f.body || ''}`).replace(/^---\n[\s\S]*?\n---\n?/, ''); events.push(f.path); },
+      process: async (f, fn) => { f.body = fn(`${HEAD}${f.body || ''}`).replace(/^---\n[\s\S]*?\n---\n?/, ''); f.stat.mtime += 1; events.push(f.path); },
       create: async () => { throw new Error('no create in these gates'); },
     },
     metadataCache: { getFileCache: (f) => ({ frontmatter: f.fm }) },
     fileManager: {
-      processFrontMatter: async (f, fn) => { fn(f.fm); events.push(f.path); },
+      processFrontMatter: async (f, fn) => { fn(f.fm); f.stat.mtime += 1; events.push(f.path); },
     },
   };
   return { app, root, events, byPath };
@@ -314,13 +318,32 @@ test('THE PROPERTY: every source completes through the one crossing, and no diff
   assert.match(c, /it never changes a status at the source to make it match this vault\. The source always wins\./);
 });
 
-test('syncWriteSuppressed: a window, not a mute', () => {
+test('THE SIGNAL: the file mtime, not a clock window', () => {
   const now = 1_000_000;
-  assert.equal(T.syncWriteSuppressed(now, now), true);
-  assert.equal(T.syncWriteSuppressed(now, now + T.SYNC_WRITE_WINDOW_MS - 1), true);
-  assert.equal(T.syncWriteSuppressed(now, now + T.SYNC_WRITE_WINDOW_MS), false, 'the window closes');
-  assert.equal(T.syncWriteSuppressed(now, now - 1), false, 'a clock that went backwards suppresses nothing');
-  assert.equal(T.syncWriteSuppressed(undefined, now), false, 'an unstamped path is never suppressed');
-  assert.equal(T.syncWriteSuppressed(now, now + 10, 5), false, 'the window is a parameter, so a test can pin it');
-  assert.ok(T.SYNC_WRITE_WINDOW_MS > 900, 'it must outlast the push-check debounce');
+  assert.equal(T.syncWriteIsOwn(now, now), true, 'the file is byte for byte as the sync left it');
+  assert.equal(T.syncWriteIsOwn(now, now + 1), false, 'someone has written since: not ours');
+  assert.equal(T.syncWriteIsOwn(now, now - 1), false, 'a clock that went backwards proves nothing');
+  assert.equal(T.syncWriteIsOwn(undefined, now), false, 'an unstamped path is never suppressed');
+  assert.equal(T.syncWriteIsOwn(now, NaN), false, 'a file with no stat is never suppressed');
+  assert.equal(T.SYNC_WRITE_WINDOW_MS, undefined, 'the window is gone, not merely unused');
+  assert.equal(T.syncWriteSuppressed, undefined);
+});
+
+test('the stamp is the mtime of the file the sync just wrote, and a hand edit spends it', async () => {
+  const n = note('a1');
+  const { p, v } = plugin({}, [n]);
+  await v.app.fileManager.processFrontMatter(n, (fm) => { fm.status = 'done'; });
+  p.markSyncWrite(n);
+  assert.equal(p.isSyncWrite(n.path), true, 'the push check declines the event this write causes');
+  assert.equal(p.isSyncWrite(n.path), true, 'and again: no window to lapse, however late the event arrives');
+  // Anyone else writing the note moves the mtime, and the stamp is spent.
+  await v.app.fileManager.processFrontMatter(n, (fm) => { fm.done_local = false; });
+  assert.equal(p.isSyncWrite(n.path), false, 'a hand edit is read as what it is, at once');
+  assert.equal(p._syncWrites.has(n.path), false, 'a spent stamp is dropped rather than left to rot');
+  // A stamp a card action clears is gone whatever the mtime says.
+  p.markSyncWrite(n);
+  p.clearSyncWrite(n.path);
+  assert.equal(p.isSyncWrite(n.path), false);
+  // An unknown path was never stamped.
+  assert.equal(p.isSyncWrite(`${FOLDER}/nothing.md`), false);
 });

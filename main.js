@@ -3165,6 +3165,11 @@ function imapItemsFromFetch(fetched, host) {
       status: null,
       recurring: false,
       dueString: null,
+      // The one identifier a mailbox rebuild cannot change (RFC 5322 3.6.4:
+      // globally unique, set by the sending host, never rewritten). The UID
+      // is the identity; this is what re-finds the mail when the UID is
+      // renumbered out from under the vault.
+      messageId: messageId || null,
     });
   }
   items.reverse(); // newest first
@@ -3178,7 +3183,12 @@ function imapItemsFromFetch(fetched, host) {
 // SEARCH found, which is not the same as how many the FETCH read.
 function imapFetchStarredRaw(opts, user, pass, maxItems, deps, report) {
   const steps = [
-    { stage: 'examine', cmd: () => 'EXAMINE INBOX' },
+    {
+      stage: 'examine', cmd: () => 'EXAMINE INBOX',
+      // Every UID below belongs to this generation of the mailbox and to no
+      // other. Recorded here, checked again by the probe.
+      untagged: (entry, ctx) => { const v = imapUidValidityOf(entry); if (v) ctx.uidValidity = v; },
+    },
     {
       stage: 'search', cmd: () => 'UID SEARCH FLAGGED',
       untagged: (entry, ctx) => {
@@ -3198,7 +3208,10 @@ function imapFetchStarredRaw(opts, user, pass, maxItems, deps, report) {
     },
   ];
   return imapSession(opts, user, pass, steps, deps).then((ctx) => {
-    if (report) report.flagged = (ctx.uids || []).length;
+    if (report) {
+      report.flagged = (ctx.uids || []).length;
+      report.uidValidity = ctx.uidValidity || null;
+    }
     return imapItemsFromFetch(ctx.fetched || [], opts.host);
   });
 }
@@ -3240,10 +3253,13 @@ async function emailFetchStarred(settings, deps) {
     const report = {};
     const items = await imapFetchStarredRaw(opts, user, pass, EMAIL_MAX_ITEMS, deps, report);
     const flagged = Number(report.flagged) || 0;
-    if (flagged > EMAIL_MAX_ITEMS) {
-      return okResult('email', items, `sync incomplete, ${flagged} starred mails but only the newest ${EMAIL_MAX_ITEMS} were read, so nothing was marked done.`, false);
-    }
-    return okResult('email', items);
+    const out = flagged > EMAIL_MAX_ITEMS
+      ? okResult('email', items, `sync incomplete, ${flagged} starred mails but only the newest ${EMAIL_MAX_ITEMS} were read, so nothing was marked done.`, false)
+      : okResult('email', items);
+    // The generation these UIDs belong to, carried to the shadow the way
+    // ClickUp carries its scope: it is the question this answer answered.
+    if (report.uidValidity) out.uidValidity = report.uidValidity;
+    return out;
   } catch (e) {
     const c = classifyImapError(e, opts.host, opts);
     return degraded('email', imapReasonToConnector(c.reason), c.message, c.hint, c.docUrl);
@@ -3284,6 +3300,33 @@ function imapSetStarredRaw(opts, user, pass, uid, starred, deps) {
   return imapSession(opts, user, pass, steps, deps).then(() => undefined);
 }
 
+/* ---- UIDVALIDITY: is this UID still worth asking about? (0.15.1) --------
+ * RFC 3501 2.3.1.1: a mailbox carries a generation number, and "if unique
+ * identifiers from an earlier session fail to persist, the UIDVALIDITY value
+ * MUST be greater". A Dovecot rebuild, an Exchange or iCloud migration, a
+ * mailbox restored from backup: after one of those every UID the vault holds
+ * points at nothing, and the probe's own signal for "no such message" (an
+ * empty FETCH, 6.4.8) fires for every starred-email note at once.
+ *
+ * Absence of the message and absence of the whole numbering are not the same
+ * fact, and only the first one may trash a note. So the fetch records the
+ * generation, the probe reads it again, and a mismatch resolves to null,
+ * which absenceVerdict maps to the harmless completion path. Gmail keeps
+ * UIDVALIDITY stable in practice; nothing in the protocol promises it.
+ */
+function imapUidValidityOf(entry) {
+  const m = /^\* OK \[UIDVALIDITY (\d+)\]/i.exec(String(entry == null ? '' : entry));
+  return m ? m[1] : null;
+}
+// Pure. 'same' -> the UID means what it meant, the probe's answer stands.
+// 'rebuilt' -> every stored UID is meaningless, the probe knows nothing.
+// 'unknown' -> no baseline on one side (a note stamped before 0.15.1, or a
+// server that sent no code): behave exactly as the release before this one.
+function uidValidityVerdict(stored, live) {
+  if (stored == null || stored === '' || live == null || live === '') return 'unknown';
+  return String(stored) === String(live) ? 'same' : 'rebuilt';
+}
+
 // Is this UID still in the mailbox? EXAMINE, not SELECT: the probe is
 // strictly read-only and adds no write surface to the one UID STORE the
 // star toggle already owns. An absent UID makes the server answer the FETCH
@@ -3293,26 +3336,41 @@ function imapSetStarredRaw(opts, user, pass, uid, starred, deps) {
 // moved to another folder, which is the same thing for a planner whose whole
 // question is INBOX. A message still in INBOX but unstarred is completed,
 // not deleted, and reconcile owns that case as before.
-function imapProbeGoneRaw(opts, user, pass, uid, deps) {
+// `wantUidValidity` is the generation the note's UID was fetched under. A
+// mailbox answering with a different one has renumbered, and the answer to
+// "is UID 42 there" is then meaningless rather than negative: null, never
+// true (Flint, 2026-09-17, finding 3).
+function imapProbeGoneRaw(opts, user, pass, uid, deps, wantUidValidity) {
   let safeUid;
   try { safeUid = imapUidOrThrow(uid); } catch (e) { return Promise.reject(e); }
   let seen = false;
+  let live = null;
   const steps = [
-    { stage: 'select', cmd: () => 'EXAMINE INBOX' },
+    {
+      stage: 'select', cmd: () => 'EXAMINE INBOX',
+      untagged: (entry) => { const v = imapUidValidityOf(entry); if (v) live = v; },
+    },
     {
       stage: 'fetch',
       cmd: () => `UID FETCH ${safeUid} (UID)`,
       untagged: (entry) => { if (/\bFETCH\b/i.test(entry)) seen = true; },
     },
   ];
-  return imapSession(opts, user, pass, steps, deps).then(() => !seen);
+  return imapSession(opts, user, pass, steps, deps).then(() => {
+    if (uidValidityVerdict(wantUidValidity, live) === 'rebuilt') return null;
+    return !seen;
+  });
 }
 
+// `deps.shadow` is the item's shadow, handed down by probeGoneIds: it carries
+// the generation this UID was fetched under. Absent (an older note, another
+// caller) the probe behaves as it did before 0.15.1.
 async function emailProbeGone(settings, item, deps) {
   const s = settings || {};
   if (!CONNECTORS.email.configured(s)) return null;
+  const want = deps && deps.shadow ? deps.shadow.uidvalidity : null;
   try {
-    return await imapProbeGoneRaw(imapTransportOptions(s), trimmed(s.imapUser), trimmed(s.imapPassword), item.id, deps);
+    return await imapProbeGoneRaw(imapTransportOptions(s), trimmed(s.imapUser), trimmed(s.imapPassword), item.id, deps, want);
   } catch { return null; }
 }
 
@@ -4724,17 +4782,34 @@ function reopenDecision({ statusDone, completeOnSource, synced }) {
  * and stamps nothing, and toggleDoneLocal clears any stamp on its path, so
  * a check one tick after a sync write still pushes at once.
  *
- * The window is a few seconds, comfortably past the 900 ms push debounce
- * and short enough that a hand edit typed into a note the sync just touched
- * is at worst deferred to the next sync, where threeWayMerge picks it up.
+ * The signal is the FILE's own mtime, not a clock window (0.15.1, Flint's
+ * Q1). `processFrontMatter` and `vault.process` both resolve after the
+ * adapter has reconciled the index, so the live `TFile.stat.mtime` right
+ * after the await IS the mtime of the write that just landed. Record it; in
+ * the handler, a file still carrying that exact mtime is one nobody else has
+ * touched, and anything else is somebody's edit.
+ *
+ * A window had to guess how late the `changed` event might be, and the cache
+ * indexes from a queue: a large startup index, an Obsidian Sync burst or an
+ * iOS suspend can push the event past any window, while a hand edit typed
+ * inside the window was deferred to the next sync for nothing. The mtime
+ * answers both without a clock.
+ *
+ * It is not load-bearing either way. If an adapter ever updated the stat
+ * after the write resolved, the stamp would simply read as "not ours" and
+ * the push check would run, where the note and the shadow already agree
+ * after every sync write and a reopen needs the explicit flag. The signal
+ * saves work; the invariant is carried by the other two layers.
  */
-const SYNC_WRITE_WINDOW_MS = 3000;
-function syncWriteSuppressed(stampedAtMs, nowMs, windowMs) {
-  if (!Number.isFinite(stampedAtMs) || !Number.isFinite(nowMs)) return false;
-  const w = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : SYNC_WRITE_WINDOW_MS;
-  const age = nowMs - stampedAtMs;
-  return age >= 0 && age < w;
+function syncWriteIsOwn(recordedMtime, liveMtime) {
+  if (!Number.isFinite(recordedMtime) || !Number.isFinite(liveMtime)) return false;
+  return recordedMtime === liveMtime;
 }
+// The stamp map is per note path and every sync write overwrites its own
+// entry, so it is bounded by the notes one sync touches. The cap is belt on
+// top of braces for a vault that renames notes out from under it: oldest
+// insertion first, which Map iteration gives for free.
+const SYNC_WRITE_MAX_PATHS = 500;
 
 // Newest last, oldest dropped past the cap.
 const OCCURRENCE_CAP = 30;
@@ -4841,6 +4916,55 @@ function absenceVerdict(probe) { return probe === true ? 'gone' : 'done'; }
 function canProbeGone(source) {
   const c = CONNECTORS[source];
   return !!(c && typeof c.probeGone === 'function');
+}
+
+/* ---- re-mapping a note onto a new id (0.15.1) ---------------------------
+ * A mailbox rebuild renumbers every message, so the mail the vault already
+ * has a note for comes back as a NEW item under a new UID. Trashing the old
+ * note and creating a new one loses the whole planner half of it: the day,
+ * the half, the order, the week pin, the linked note.
+ *
+ * The Message-ID survives the rebuild, so the pairing is available: an item
+ * the vault does not know, whose Message-ID matches the shadow of a note
+ * whose id the fetch no longer returns, IS that note under a new number.
+ * The same pairing rescues an ordinary move out of INBOX and back, which
+ * also mints a new UID.
+ *
+ * Pure, so the pairing is a test and not a hope. Returns
+ * [{ from, to, item, prior }] in the order the fetch gave.
+ */
+function remapByMessageId(source, items, existing, shadowMap) {
+  const out = [];
+  const byMessageId = new Map();
+  const prefix = `${source}:`;
+  for (const key of Object.keys(shadowMap || {})) {
+    if (!key.startsWith(prefix)) continue;
+    const mid = (shadowMap[key] || {}).messageId;
+    const id = key.slice(prefix.length);
+    // Only a note that still exists and that the fetch no longer knows.
+    if (!mid || !existing || !existing.has(id)) continue;
+    if (!byMessageId.has(mid)) byMessageId.set(mid, id);
+  }
+  const claimed = new Set();
+  for (const t of (items || [])) {
+    const mid = t && t.messageId;
+    if (!mid || existing.has(t.id)) continue;
+    const from = byMessageId.get(mid);
+    // One note per mail: a second item carrying the same Message-ID is a
+    // second mail, and gets a note of its own.
+    if (!from || claimed.has(from) || from === t.id) continue;
+    claimed.add(from);
+    out.push({ from, to: t.id, item: t, prior: existing.get(from) });
+  }
+  return out;
+}
+
+// The one notice for a sync that renumbered notes, in plain words.
+function remapNotice(label, n) {
+  if (!n) return null;
+  return n === 1
+    ? `Planner: ${label} renumbered its messages, so a note was re-matched to its mail.`
+    : `Planner: ${label} renumbered its messages, so ${n} notes were re-matched to their mail.`;
 }
 
 // The one notice for a sync that trashed notes, in plain words. Never one
@@ -6545,9 +6669,9 @@ class IcorPlannerPlugin extends Plugin {
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
     this._pushTimers = new Map();
-    // path -> ms of the last write this plugin's own sync run made there.
-    // Read by the push check so a sync write is never mistaken for a local
-    // edit; see the self-write suppression block above syncWriteSuppressed.
+    // path -> the file mtime this plugin's own sync run left there. Read by
+    // the push check so a sync write is never mistaken for a local edit; see
+    // the self-write suppression block above syncWriteIsOwn.
     this._syncWrites = new Map();
     // `source:id` asked about during the current sync pass, so one absent
     // item costs one GET however many code paths look at it. Cleared at the
@@ -6747,11 +6871,27 @@ class IcorPlannerPlugin extends Plugin {
     } catch { /* detection is a convenience; ensureFolders covers the rest */ }
   }
 
+  // Nothing this plugin scheduled may run after it is gone: a pending push
+  // check would write to a SOURCE from an unloaded plugin, and a pending
+  // shadow save would write settings the next load has already replaced.
   onunload() {
     setDisplayFormatSource(null);
     this.removeNextBadge();
     this.removePlannerToolbarButton();
     if (this._cacheWriteTimer) { window.clearTimeout(this._cacheWriteTimer); this._cacheWriteTimer = null; }
+    if (this._pushTimers) {
+      for (const t of this._pushTimers.values()) window.clearTimeout(t);
+      this._pushTimers.clear();
+    }
+    // The 1.5 s debounce must not cost a quit its shadow state: the timer
+    // goes and the save it was waiting to make happens now. Best effort by
+    // definition (unload is synchronous, the write is not), which is still
+    // strictly more than dropping it.
+    if (this._shadowSaveTimer) {
+      window.clearTimeout(this._shadowSaveTimer);
+      this._shadowSaveTimer = null;
+      try { this.persistSettings(); } catch { /* the vault is going away either way */ }
+    }
   }
 
   // Any source with a connector, calendar included. Manual is excluded on
@@ -7213,6 +7353,9 @@ class IcorPlannerPlugin extends Plugin {
     // What question this answer answered (ClickUp's filter today, nothing
     // anywhere else). Null means the query cannot narrow.
     const scope = (result && result.scope) || null;
+    // The mailbox generation these ids belong to (IMAP only). Same contract
+    // as `scope`: it rides on the result and is stored beside each shadow.
+    const uidValidity = (result && result.uidValidity) || null;
     const folder = this.paths().sourceFolder(source);
     const s = this.withSecrets(); // shallow: s._shadow is the live map
     const allItems = collectItems(this.app, this.paths().root);
@@ -7221,6 +7364,28 @@ class IcorPlannerPlugin extends Plugin {
       if (it.source === source) existing.set(it.id, it);
     }
     const index = buildItemIndex(allItems);
+    // A renumbered mailbox first: the notes follow their mail onto the new
+    // ids BEFORE anything reads the open set, so the rest of this pass sees
+    // an ordinary sync and neither creates a duplicate nor reconciles the
+    // old id as absent.
+    const remapped = remapByMessageId(source, items, existing, s._shadow);
+    for (const r of remapped) {
+      if (!r.prior || !r.prior.file) continue;
+      const oldKey = `${source}:${r.from}`;
+      const newKey = `${source}:${r.to}`;
+      // `external_id` is the identity the plugin reads; the id in the
+      // filename is display, and renaming a note would churn Sync, links and
+      // the cache for no gain (Flint, 2026-09-17, Q3).
+      await this.app.fileManager.processFrontMatter(r.prior.file, (fm) => { fm.external_id = String(r.to); });
+      this.markSyncWrite(r.prior.file);
+      s._shadow[newKey] = Object.assign({}, s._shadow[oldKey] || {});
+      delete s._shadow[oldKey];
+      // `allItems` holds these same objects, so reconcile below sees the new
+      // id too and never reads the note as an absent one.
+      r.prior.id = r.to;
+      existing.delete(r.from);
+      existing.set(r.to, r.prior);
+    }
     const advancedParents = [];
     const openIds = new Set();
     // Notes this pass moved to the trash because the source no longer has
@@ -7231,6 +7396,11 @@ class IcorPlannerPlugin extends Plugin {
       const prior = existing.get(t.id);
       if (!prior) {
         await this.createItemFile(folder, source, t);
+        const fresh = s._shadow[`${source}:${t.id}`];
+        if (fresh) {
+          if (uidValidity) fresh.uidvalidity = uidValidity;
+          if (t.messageId) fresh.messageId = t.messageId;
+        }
         continue;
       }
       const key = `${source}:${t.id}`;
@@ -7282,6 +7452,10 @@ class IcorPlannerPlugin extends Plugin {
       }
       if (nextShadow.done && shadow && shadow.doneAt) nextShadow.doneAt = shadow.doneAt;
       if (scope) nextShadow.scope = scope;
+      // Stamped on every pass the source returns the item, so the baseline
+      // the probe compares against is never older than the last sync.
+      if (uidValidity) nextShadow.uidvalidity = uidValidity;
+      if (t.messageId) nextShadow.messageId = t.messageId;
       s._shadow[key] = nextShadow;
       await this.updateItemFile(prior, t, finals, body, plan);
       if (plan.resetChildrenDoneLocal) advancedParents.push(key);
@@ -7294,7 +7468,7 @@ class IcorPlannerPlugin extends Plugin {
       for (const child of index.childrenOf.get(key) || []) {
         if (!openIds.has(child.id) || !child.doneLocal || !child.file) continue;
         await this.app.fileManager.processFrontMatter(child.file, (fm) => { fm.done_local = false; });
-        this.markSyncWrite(child.file.path);
+        this.markSyncWrite(child.file);
         const ck = `${source}:${child.id}`;
         if (s._shadow[ck]) s._shadow[ck].done = false;
       }
@@ -7351,7 +7525,7 @@ class IcorPlannerPlugin extends Plugin {
         fm.done_at = new Date().toISOString();
         fm.synced_at = new Date().toISOString();
       });
-      this.markSyncWrite(it.file.path);
+      this.markSyncWrite(it.file);
     }
     // A reopen that has not reached the source yet (the push path failed, or
     // the sync ran first): send it now. The flag is cleared only when the
@@ -7382,6 +7556,8 @@ class IcorPlannerPlugin extends Plugin {
         }
       }
     }
+    const rnote = remapNotice(SOURCES[source].label, remapped.length);
+    if (rnote) new Notice(rnote, 8000);
     const gnote = goneNotice(SOURCES[source].label, trashed);
     if (gnote) new Notice(gnote, 8000);
     for (const key of pruneShadows(s._shadow, source, new Set(existing.keys()), openIds, nowMs)) {
@@ -7432,7 +7608,11 @@ class IcorPlannerPlugin extends Plugin {
       if (this._goneProbed.has(`${source}:${it.id}`)) continue;
       this._goneProbed.add(`${source}:${it.id}`);
       let probe = null;
-      try { probe = await CONNECTORS[source].probeGone(s, it, deps || {}); } catch { probe = null; }
+      // The shadow rides along: it carries what the connector needs to tell
+      // "this id is gone" from "this id cannot be asked about any more"
+      // (IMAP's UIDVALIDITY today). A connector that needs none ignores it.
+      const probeDeps = Object.assign({}, deps || {}, { shadow: s._shadow ? (s._shadow[`${source}:${it.id}`] || null) : null });
+      try { probe = await CONNECTORS[source].probeGone(s, it, probeDeps); } catch { probe = null; }
       if (absenceVerdict(probe) === 'gone') gone.add(it.id);
     }
     return gone;
@@ -7568,13 +7748,22 @@ class IcorPlannerPlugin extends Plugin {
   // A sync run announcing its own hand. Called by every write a sync makes
   // to an item note, and by nothing else: a card action is the person acting
   // and must reach the source at once.
-  markSyncWrite(path) {
-    if (!path || !this._syncWrites) return;
-    const now = Date.now();
-    for (const [p, at] of this._syncWrites) {
-      if (!syncWriteSuppressed(at, now)) this._syncWrites.delete(p);
+  // Takes the TFile wherever the caller has one (no lookup, and it works for
+  // a file the index has not published yet), a path otherwise.
+  markSyncWrite(fileOrPath) {
+    if (!fileOrPath || !this._syncWrites) return;
+    const file = typeof fileOrPath === 'string' ? this.app.vault.getAbstractFileByPath(fileOrPath) : fileOrPath;
+    if (!file || !file.path) return;
+    const mtime = file.stat ? Number(file.stat.mtime) : NaN;
+    // No stat, no signal: leave no stamp rather than a false one.
+    if (!Number.isFinite(mtime)) { this._syncWrites.delete(file.path); return; }
+    this._syncWrites.delete(file.path);
+    this._syncWrites.set(file.path, mtime);
+    while (this._syncWrites.size > SYNC_WRITE_MAX_PATHS) {
+      const oldest = this._syncWrites.keys().next();
+      if (oldest.done) break;
+      this._syncWrites.delete(oldest.value);
     }
-    this._syncWrites.set(path, now);
   }
 
   // The person's own action on a note the sync just wrote: the stamp goes,
@@ -7582,7 +7771,14 @@ class IcorPlannerPlugin extends Plugin {
   clearSyncWrite(path) { if (this._syncWrites) this._syncWrites.delete(path); }
 
   isSyncWrite(path) {
-    return !!this._syncWrites && syncWriteSuppressed(this._syncWrites.get(path), Date.now());
+    if (!this._syncWrites || !this._syncWrites.has(path)) return false;
+    const file = this.app.vault.getAbstractFileByPath(path);
+    const live = file && file.stat ? Number(file.stat.mtime) : NaN;
+    const own = syncWriteIsOwn(this._syncWrites.get(path), live);
+    // Once the file has moved on, the stamp can never match again: spend it
+    // here rather than leave it to be re-read on every later event.
+    if (!own) this._syncWrites.delete(path);
+    return own;
   }
 
   // Debounced per-file: a local edit (user typing, a card action, or an agent
@@ -7726,11 +7922,11 @@ class IcorPlannerPlugin extends Plugin {
     ];
     const body = (t.description || '').trim();
     try {
-      await this.app.vault.create(path, fmLines.join('\n') + (body ? body + '\n' : ''));
+      const created = await this.app.vault.create(path, fmLines.join('\n') + (body ? body + '\n' : ''));
       this.settings._shadow[`${source}:${t.id}`] = {
         due: t.due || null, priority: t.priority, description: body, done: false,
       };
-      this.markSyncWrite(path);
+      this.markSyncWrite(created || path);
     } catch { /* a race with another writer - the next sync settles it */ }
   }
 
@@ -7807,7 +8003,7 @@ class IcorPlannerPlugin extends Plugin {
         }
         fm.synced_at = nowIso;
       });
-      this.markSyncWrite(prior.file.path);
+      this.markSyncWrite(prior.file);
     }
     // Body follows the settled description, never blindly the source.
     const desc = (finals.description || '').trim();
@@ -7818,7 +8014,7 @@ class IcorPlannerPlugin extends Plugin {
           const head = m ? m[0] : '';
           return head + (desc ? desc + '\n' : '');
         });
-        this.markSyncWrite(prior.file.path);
+        this.markSyncWrite(prior.file);
       }
     } catch { /* body refresh is cosmetic - never fail the sync on it */ }
   }
@@ -11869,7 +12065,9 @@ module.exports.__test = {
   manualExternalId, manualItemFrontmatter, reconcileStaleIds, scopeAgrees, clickupScopeKey, EMAIL_MAX_ITEMS,
   itemFromFrontmatter, clampPriorityRank, safeBasename,
   syncCompletionPlan, occurrenceAdvanced, reopenDecision, appendOccurrence,
-  syncWriteSuppressed, SYNC_WRITE_WINDOW_MS,
+  syncWriteIsOwn, SYNC_WRITE_MAX_PATHS,
+  imapUidValidityOf, uidValidityVerdict, imapProbeGoneRaw, emailProbeGone,
+  remapByMessageId, remapNotice,
   ghostItemsFor, pruneShadows, normalizeOccurrences, OCCURRENCE_CAP, DONE_SHADOW_MAX_AGE_MS,
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
