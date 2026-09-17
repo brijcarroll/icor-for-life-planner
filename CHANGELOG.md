@@ -6,6 +6,31 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.15.1] - 2026-09-17
+
+### Fixed
+- **Your starred-email notes survive a mailbox rebuild.** Mail servers
+  occasionally renumber every message in a mailbox: after a server rebuild,
+  a migration to another provider, or a restore from backup, the numbers the
+  planner stored point at nothing. The planner used to read that as "every
+  starred mail was deleted" and move all of those notes to the trash at
+  once, taking the day, the half, the order, the week star and the linked
+  note with them. It now checks whether the numbering still holds before it
+  believes an answer, and when it does not, it changes nothing and says so
+  in plain words instead. Where it can tell which note belongs to which mail
+  (by the message's own permanent id) it simply re-matches the note to the
+  mail, so nothing is lost and nothing is duplicated. Gmail almost never
+  renumbers; other providers do.
+- **An edit you type right after a sync is no longer held back.** The
+  planner needs to tell its own writing from yours, and it used to do that
+  with a three second stopwatch, which meant your edit inside those three
+  seconds waited for the next sync, and a slow vault could confuse the two
+  in the other direction. It now compares the file itself, which is exact:
+  your edit is picked up the moment you make it, however busy the vault is.
+- **Nothing the planner scheduled runs after you disable or update it.** A
+  pending change on its way to a source and a pending settings save are both
+  finished or dropped cleanly when the plugin unloads.
+
 ## [0.15.0] - 2026-09-17
 
 ### Changed
