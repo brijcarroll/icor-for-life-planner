@@ -362,7 +362,9 @@ test('source scan: no credential consumer is handed the raw settings', () => {
   // The resolved view exists and the three sync paths use it.
   assert.match(c, /withSecrets\(\) \{ return withSecrets\(this\.settings, this\.secrets\); \}/);
   assert.match(c, /const s = this\.withSecrets\(\);[^\n]*\n\s*const runs = SYNCED_SOURCES\.map\(\(k\) => \[k, CONNECTORS\[k\]\.fetchOpen\(s\)\]\)/, 'syncNow resolves before the connectors start');
-  assert.equal((c.match(/const s = this\.withSecrets\(\);/g) || []).length, 3, 'syncNow, upsertSource and detectAndPush');
+  // probeGoneIds joined in 0.15.0: the "is this task still there" GET is a
+  // credential consumer like any other and reads the resolved view too.
+  assert.equal((c.match(/const s = this\.withSecrets\(\);/g) || []).length, 4, 'syncNow, upsertSource, probeGoneIds and detectAndPush');
   // Every write of the settings to disk goes through the one method that moves secrets out first.
   assert.equal((c.match(/this\.saveData\(this\.settings\)/g) || []).length, 1, 'saveData is called from persistSettings only');
   assert.match(c, /async persistSettings\(\) \{\n\s*await migrateSecretsSettled\(this\.settings, this\.secrets\);\n\s*await this\.saveData\(this\.settings\);/);

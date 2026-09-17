@@ -95,6 +95,7 @@ function plugin(settings, files) {
   p.app = v.app;
   p._pushTimers = new Map();
   p._syncWrites = new Map();
+  p._goneProbed = new Set();
   // Pre-0.14.3 bytes have no self-write stamp. Standing in for it with "not
   // a sync write" is what lets every gate below run against the old main.js
   // through PLANNER_MAIN and be SEEN red, which is the whole point of them.

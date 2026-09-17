@@ -77,7 +77,7 @@ const CONNECTORS = {
     svg: 'M2 22l1.5-5.5L14.9 5.1l4 4L7.5 20.5 2 22zM16.3 3.7l1.4-1.4a1.9 1.9 0 0 1 2.7 0l1.3 1.3a1.9 1.9 0 0 1 0 2.7l-1.4 1.4-4-4z',
     // Always configured: there is nothing to configure.
     configured: () => true,
-    fetchOpen: null, setClosed: null, pushFields: null,
+    fetchOpen: null, setClosed: null, pushFields: null, probeGone: null,
     platforms: ['desktop', 'mobile'],
   },
   todoist: {
@@ -86,6 +86,7 @@ const CONNECTORS = {
     fetchOpen: (s, deps) => todoistFetchOpen(s, deps),
     setClosed: (s, item, closed) => todoistSetClosed(trimmed(s.todoistToken), item.id, closed),
     pushFields: (s, item, pushes) => todoistPushFields(trimmed(s.todoistToken), item.id, pushes),
+    probeGone: (s, item, deps) => todoistProbeGone(trimmed(s.todoistToken), item.id, deps),
     doneNotice: (closed) => (closed ? 'Planner: closed in Todoist.' : 'Planner: reopened in Todoist.'),
     platforms: ['desktop', 'mobile'],
     svg: 'M21 0H3C1.35 0 0 1.35 0 3v3.858s3.854 2.24 4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.608 8.136-4.675.279-.161.58-.107.748-.01.164.097.606.348.84.48.232.134.221.502.013.622l-9.712 5.59c-.346.2-.69.204-1.048.002C3.478 10.907.998 9.463 0 8.882v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.008.164.096.606.347.84.48.232.133.221.5.013.62-.208.121-9.288 5.346-9.712 5.59-.346.2-.69.205-1.048.002C3.478 14.951.998 13.506 0 12.926v2.02l4.098 2.38c.31.18.694.177 1.004 0 .26-.147 8.02-4.609 8.136-4.676.279-.16.58-.106.748-.009.164.097.606.348.84.48.232.133.221.502.013.622l-9.712 5.59c-.346.199-.69.204-1.048.001C3.478 18.994.998 17.55 0 16.97V21c0 1.65 1.35 3 3 3h18c1.65 0 3-1.35 3-3V3c0-1.65-1.35-3-3-3z',
@@ -96,6 +97,7 @@ const CONNECTORS = {
     fetchOpen: (s, deps) => clickupFetchOpen(s, deps),
     setClosed: (s, item, closed) => clickupSetClosed(trimmed(s.clickupToken), item.id, item.listId, closed),
     pushFields: (s, item, pushes) => clickupPushFields(trimmed(s.clickupToken), item.id, pushes),
+    probeGone: (s, item, deps) => clickupProbeGone(trimmed(s.clickupToken), item.id, deps),
     doneNotice: (closed) => (closed ? 'Planner: closed in ClickUp.' : 'Planner: reopened in ClickUp.'),
     platforms: ['desktop', 'mobile'],
     svg: 'M2 18.439l3.69-2.828c1.961 2.56 4.044 3.739 6.363 3.739 2.307 0 4.33-1.166 6.203-3.704L22 18.405C19.298 22.065 15.941 24 12.053 24 8.178 24 4.788 22.078 2 18.439zM12.04 6.15l-6.568 5.66-3.036-3.52L12.055 0l9.543 8.296-3.05 3.509z',
@@ -117,6 +119,7 @@ const CONNECTORS = {
     },
     // Email takes the star flag only, never field writes.
     pushFields: null,
+    probeGone: (s, item, deps) => emailProbeGone(s, item, deps),
     doneNotice: (closed) => (closed ? 'Planner: unstarred the email.' : 'Planner: starred the email again.'),
     // IMAP needs a raw TLS socket, which the mobile app does not have.
     platforms: ['desktop'],
@@ -138,6 +141,7 @@ const CONNECTORS = {
     setClosed: (s, item, closed, deps) => outlookSetClosed(s, item, closed, deps),
     // The flag is the one thing the mailbox takes; never field writes.
     pushFields: null,
+    probeGone: (s, item, deps) => outlookProbeGone(s, item, deps),
     doneNotice: (closed) => (closed ? 'Planner: marked the email complete in Outlook.' : 'Planner: flagged the email again in Outlook.'),
     platforms: ['desktop', 'mobile'],
     // A flag, not a brand mark: a card from here IS a flagged email, and the
@@ -1669,7 +1673,24 @@ function truncatedWarning(read) {
  * No shadow yet (first sync of an item) -> pull everything, seed the shadow.
  * ========================================================================== */
 
-const TWO_WAY_FIELDS = ['due', 'priority', 'description'];
+// The SHARED fields: the ones that round-trip. Everything else on a note is
+// either source-owned and pulled (url, tags, source_status, list_id,
+// parent_id, recurring) or plan-owned and never sent anywhere
+// (PLAN_OWNED_ITEM_FIELDS). Quinn's Sunsama research (2026-09-17) calls this
+// split the reason their sync is boring and reliable, and the Planner keeps
+// it. `title` joined the set in 0.15.0 on Tom's rule: Sunsama deliberately
+// never writes a title or a description back, so there is no prior art here
+// and none to blame. Subtasks, comments and time tracking stay local, which
+// is where Sunsama stops too.
+const TWO_WAY_FIELDS = ['title', 'due', 'priority', 'description'];
+
+// A title is the one shared field a source cannot be handed empty: a blank
+// `title:` in a note is a hand-edit accident, and pushing it would wipe the
+// task's name at the source. An empty local title keeps the source's.
+function pushableTitle(value) {
+  const t = trimmed(value);
+  return t ? t : null;
+}
 
 function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
   const pushes = {};
@@ -1678,7 +1699,13 @@ function threeWayMerge(sourceVals, localVals, shadow, pushEnabled) {
   for (const f of TWO_WAY_FIELDS) {
     const src = sourceVals[f] == null || sourceVals[f] === '' ? (f === 'priority' ? 5 : null) : sourceVals[f];
     const loc = localVals[f] == null || localVals[f] === '' ? (f === 'priority' ? 5 : null) : localVals[f];
-    if (!shadow) { finals[f] = src; nextShadow[f] = src; continue; }
+    // No baseline for this field: either no shadow at all, or a shadow
+    // written before the field joined the shared set (every install carries
+    // one of those for `title` after 0.15.0). Without a baseline there is no
+    // way to tell a local edit from a value that was always there, so the
+    // source seeds it. Getting this wrong would push every task's title back
+    // to its source on the first sync after the upgrade.
+    if (!shadow || !(f in shadow)) { finals[f] = src; nextShadow[f] = src; continue; }
     const base = shadow[f] == null || shadow[f] === '' ? (f === 'priority' ? 5 : null) : shadow[f];
     const srcChanged = src !== base;
     const locChanged = loc !== base;
@@ -1773,6 +1800,7 @@ async function clickupApi(token, path, deps) {
   if (res.status === 401 || res.status === 403) {
     const err = new Error('auth'); err.auth = true; throw err;
   }
+  if (res.status === 404) throw goneError('ClickUp');
   if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status}`);
   return res.json || {};
 }
@@ -1888,7 +1916,27 @@ async function todoistWrite(token, path, payload) {
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: payload ? JSON.stringify(payload) : undefined,
   });
+  if (res.status === 404) throw goneError('Todoist');
   if (res.status < 200 || res.status >= 300) throw new Error(`Todoist HTTP ${res.status}`);
+}
+
+// Is this task still in Todoist? true = deleted, false = still there,
+// null = could not tell (network, auth, anything but a clean answer).
+// GET /tasks/{id} answers 404 for a task that was deleted OR permanently
+// removed after completion; a completed task that still exists answers 200
+// with is_completed true, which is "still there" and reconcile's own
+// business.
+async function todoistProbeGone(token, id, deps) {
+  try {
+    const res = await requestUrlOf(deps)({
+      url: `https://api.todoist.com/api/v1/tasks/${encodeURIComponent(id)}`,
+      method: 'GET', throw: false,
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.status === 404) return true;
+    if (res.status >= 200 && res.status < 300) return false;
+    return null;
+  } catch { return null; }
 }
 
 async function todoistSetClosed(token, id, closed) {
@@ -1897,6 +1945,10 @@ async function todoistSetClosed(token, id, closed) {
 
 async function todoistPushFields(token, id, pushes) {
   const payload = {};
+  if ('title' in pushes) {
+    const name = pushableTitle(pushes.title);
+    if (name) payload.content = name;
+  }
   if ('description' in pushes) payload.description = pushes.description || '';
   if ('priority' in pushes) payload.priority = todoistApiPriority(pushes.priority);
   if ('due' in pushes) {
@@ -1913,6 +1965,7 @@ async function clickupWrite(token, path, payload) {
     headers: { Authorization: token, 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+  if (res.status === 404) throw goneError('ClickUp');
   if (res.status < 200 || res.status >= 300) throw new Error(`ClickUp HTTP ${res.status}`);
 }
 
@@ -1942,8 +1995,28 @@ async function clickupSetClosed(token, id, listId, closed) {
   await clickupWrite(token, `/task/${encodeURIComponent(id)}`, { status });
 }
 
+// Is this task still in ClickUp? 404 is the plain answer; a task in the
+// ClickUp trash answers 200 with `deleted: true`, which is the same thing
+// as far as the vault is concerned.
+async function clickupProbeGone(token, id, deps) {
+  try {
+    const res = await requestUrlOf(deps)({
+      url: `https://api.clickup.com/api/v2/task/${encodeURIComponent(id)}`,
+      method: 'GET', throw: false,
+      headers: { Authorization: token },
+    });
+    if (res.status === 404) return true;
+    if (res.status >= 200 && res.status < 300) return (res.json && res.json.deleted === true) ? true : false;
+    return null;
+  } catch { return null; }
+}
+
 async function clickupPushFields(token, id, pushes) {
   const payload = {};
+  if ('title' in pushes) {
+    const name = pushableTitle(pushes.title);
+    if (name) payload.name = name;
+  }
   if ('description' in pushes) payload.description = pushes.description || '';
   if ('priority' in pushes) {
     const r = clampPriorityRank(pushes.priority);
@@ -2020,6 +2093,31 @@ const OUTLOOK_REVOKE_URLS = {
 // Every network path takes `deps` so a test can script the wire; the real
 // thing is what runs when nothing is handed in.
 const requestUrlOf = (deps) => (deps && deps.requestUrl) || requestUrl;
+
+/* ---- "that task is not there any more" (0.15.0) --------------------------
+ * A source task can leave the open set for two reasons that look identical
+ * from outside: it was completed, or it was deleted. The plugin used to read
+ * both as completion, so a deleted task stayed in the vault forever as a
+ * card that could not be opened, and any write aimed at it answered 404 in a
+ * toast that came back every sync ("reopen on ClickUp failed (HTTP 404).
+ * Will retry on sync.").
+ *
+ * The flag rides ON the error, set by the writers that read the status code,
+ * and NOTHING else counts. A message carrying "404" is not evidence: inside
+ * clickupSetClosed the list lookup (GET /list/{listId}) can 404 on its own,
+ * for a stale list_id or a list the token can no longer see, and reading
+ * that as "the task is gone" would trash a note whose task is alive and
+ * well (Flint, 2026-09-17, finding 1). Every writer that can tell sets the
+ * flag: todoistWrite, clickupWrite, clickupApi and graphHttpError.
+ */
+function goneError(label) {
+  const e = new Error(`${label} HTTP 404`);
+  e.gone = true;
+  return e;
+}
+function isGoneError(e) {
+  return !!e && e.gone === true;
+}
 const sleepOf = (deps) => (deps && deps.sleep) || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 const nowOf = (deps) => (deps && deps.now) || (() => Date.now());
 const cryptoOf = (deps) => (deps && deps.crypto) || globalThis.crypto;
@@ -2354,6 +2452,13 @@ function graphHttpError(res) {
   const code = json && json.error && json.error.code ? String(json.error.code) : '';
   if (status === 401) return outlookError('no-token', 'Microsoft rejected the token. Sign in again.');
   if (status === 403) return outlookError('misconfigured', `Microsoft refused the request${code ? ` (${code})` : ''}: a permission is missing.`, 'Sign in again and approve every permission on the consent screen.');
+  // "No such message": the one Graph status that means the mirror is stale
+  // rather than that something went wrong. Flagged here because the Outlook
+  // probe and the flag write are the only callers that care, and because
+  // isGoneError trusts the flag and nothing else.
+  if (status === 404) {
+    return Object.assign(outlookError('unreachable', 'Microsoft Graph returned HTTP 404.'), { gone: true });
+  }
   return outlookError('unreachable', `Microsoft Graph returned HTTP ${status}${code ? ` (${code})` : ''}.`);
 }
 // One Graph call with the retry contract: a 401 refreshes the token once
@@ -2477,6 +2582,25 @@ async function outlookSetClosed(settings, item, closed, deps) {
     method: 'PATCH',
     body: { flag: { flagStatus: closed ? 'complete' : 'flagged' } },
   });
+}
+
+// Is this message still in the mailbox? "Deleted" for a mail connector means
+// the message is no longer there at all (moved to Deleted Items counts: the
+// id changes on a move, so Graph answers 404 for the old one). A message
+// that is still there but no longer flagged is not deleted, it is completed,
+// and reconcile handles that as it always has.
+async function outlookProbeGone(settings, item, deps) {
+  const s = settings || {};
+  if (!outlookSignedIn(s)) return null;
+  try {
+    await graphRequest(s, deps, {
+      url: `${GRAPH_BASE}/me/messages/${encodeURIComponent(String(item.id))}?$select=id`,
+      method: 'GET',
+    });
+    return false;
+  } catch (e) {
+    return isGoneError(e) ? true : null;
+  }
 }
 
 // The settings tab's one line on the sign-in.
@@ -3158,6 +3282,38 @@ function imapSetStarredRaw(opts, user, pass, uid, starred, deps) {
     { stage: 'store', cmd: () => `UID STORE ${safeUid} ${starred ? '+' : '-'}FLAGS (\\Flagged)` },
   ];
   return imapSession(opts, user, pass, steps, deps).then(() => undefined);
+}
+
+// Is this UID still in the mailbox? EXAMINE, not SELECT: the probe is
+// strictly read-only and adds no write surface to the one UID STORE the
+// star toggle already owns. An absent UID makes the server answer the FETCH
+// with no untagged FETCH line at all, which is the signal.
+//
+// "Deleted" for IMAP means the message is no longer in INBOX: expunged, or
+// moved to another folder, which is the same thing for a planner whose whole
+// question is INBOX. A message still in INBOX but unstarred is completed,
+// not deleted, and reconcile owns that case as before.
+function imapProbeGoneRaw(opts, user, pass, uid, deps) {
+  let safeUid;
+  try { safeUid = imapUidOrThrow(uid); } catch (e) { return Promise.reject(e); }
+  let seen = false;
+  const steps = [
+    { stage: 'select', cmd: () => 'EXAMINE INBOX' },
+    {
+      stage: 'fetch',
+      cmd: () => `UID FETCH ${safeUid} (UID)`,
+      untagged: (entry) => { if (/\bFETCH\b/i.test(entry)) seen = true; },
+    },
+  ];
+  return imapSession(opts, user, pass, steps, deps).then(() => !seen);
+}
+
+async function emailProbeGone(settings, item, deps) {
+  const s = settings || {};
+  if (!CONNECTORS.email.configured(s)) return null;
+  try {
+    return await imapProbeGoneRaw(imapTransportOptions(s), trimmed(s.imapUser), trimmed(s.imapPassword), item.id, deps);
+  } catch { return null; }
 }
 
 /* ========================================================================== *
@@ -4637,6 +4793,63 @@ function pruneShadows(shadowMap, source, existingIds, openIds, nowMs, maxDoneAge
     if (sh.done === true && Number.isFinite(sh.doneAt) && nowMs - sh.doneAt > maxAge) drop.push(key);
   }
   return drop;
+}
+
+/* ========================================================================== *
+ * Deleted at the source (0.15.0)
+ *
+ * Tom's rule: the planner notes are a MIRROR of the connected sources. A task
+ * deleted there is deleted here. Until now absence from the open fetch meant
+ * one thing, "completed", so a deleted task stayed in the vault as a card
+ * that answered 404 to every write and said so in a toast on every sync.
+ *
+ * Absence cannot tell the two apart, so the plugin asks: one GET per absent
+ * id that is not already done. Three hard limits on that question, because
+ * it is the only place the plugin spends requests it did not have to:
+ *
+ *   - bounded per sync (GONE_PROBE_MAX_PER_SYNC). An absent task past the
+ *     budget is NOT asked about and takes the completion path: its note is
+ *     marked done, exactly as before this release, and it is never probed
+ *     again, because a note that is done is no longer absent-and-open and
+ *     so never enters a later batch. A vault with more than 25 tasks
+ *     vanishing from one source in one pass therefore mirrors the deletion
+ *     of the first 25 and reads the rest as completed.
+ *   - asked once per id per sync, never per call site.
+ *   - POSITIVE EVIDENCE ONLY. A probe that fails, times out, is refused or
+ *     is not implemented for a connector reads as "still there". Marking a
+ *     task done writes nothing anywhere and is one click to undo; moving a
+ *     note to the trash is not, so a note is never trashed on a guess.
+ * ========================================================================== */
+
+const GONE_PROBE_MAX_PER_SYNC = 25;
+
+// Which absent items get the confirming GET this sync, in the order they
+// were given, up to the budget. Pure so the budget is a test and not a hope.
+function goneProbeBatch(items, max) {
+  const cap = Number.isFinite(max) && max >= 0 ? max : GONE_PROBE_MAX_PER_SYNC;
+  return (items || []).slice(0, cap);
+}
+
+// What an absent item is, given what the probe found.
+//   true  -> 'gone'  the source answered "no such task": trash the note
+//   false -> 'done'  it is there and simply not open: the rule as it was
+//   null  -> 'done'  we could not tell, so we do the harmless thing
+function absenceVerdict(probe) { return probe === true ? 'gone' : 'done'; }
+
+// Can this source be asked at all? A connector without a probe (manual, the
+// calendars) is never asked and never has an item trashed under this rule.
+function canProbeGone(source) {
+  const c = CONNECTORS[source];
+  return !!(c && typeof c.probeGone === 'function');
+}
+
+// The one notice for a sync that trashed notes, in plain words. Never one
+// toast per task, and never the 404 the member cannot act on.
+function goneNotice(label, n) {
+  if (!n) return null;
+  return n === 1
+    ? `Planner: a task was deleted in ${label}, so its note moved to the trash.`
+    : `Planner: ${n} tasks were deleted in ${label}, so their notes moved to the trash.`;
 }
 
 /* ========================================================================== *
@@ -6336,6 +6549,10 @@ class IcorPlannerPlugin extends Plugin {
     // Read by the push check so a sync write is never mistaken for a local
     // edit; see the self-write suppression block above syncWriteSuppressed.
     this._syncWrites = new Map();
+    // `source:id` asked about during the current sync pass, so one absent
+    // item costs one GET however many code paths look at it. Cleared at the
+    // start of every sync (syncNow).
+    this._goneProbed = new Set();
     this.routines = [];              // the parsed routine notes (refreshRoutines); render reads this
     this._routineCache = new Map();  // path -> { mtime, routine }: zero body reads when nothing changed
     this.habits = [];                // the parsed habit notes (refreshHabits); render reads this
@@ -6922,6 +7139,8 @@ class IcorPlannerPlugin extends Plugin {
     this.syncing = true;
     this.emitModelChanged();
     try {
+      // One confirming GET per absent task per sync, not per code path.
+      this._goneProbed = new Set();
       await this.ensureFolders();
       if (this.secrets.mode === 'env-file') await this.envStore.load();
       const s = this.withSecrets();
@@ -7004,6 +7223,9 @@ class IcorPlannerPlugin extends Plugin {
     const index = buildItemIndex(allItems);
     const advancedParents = [];
     const openIds = new Set();
+    // Notes this pass moved to the trash because the source no longer has
+    // the task. One notice at the end, never one per task.
+    let trashed = 0;
     for (const t of items) {
       openIds.add(t.id);
       const prior = existing.get(t.id);
@@ -7014,22 +7236,30 @@ class IcorPlannerPlugin extends Plugin {
       const key = `${source}:${t.id}`;
       const shadow = s._shadow[key] || null;
       const body = await this.readBody(prior.file);
-      const sourceVals = { due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
-      const localVals = { due: prior.due, priority: prior.priority, description: body };
+      const sourceVals = { title: t.title, due: t.due || null, priority: t.priority, description: (t.description || '').trim() };
+      const localVals = { title: prior.title, due: prior.due, priority: prior.priority, description: body };
       const pushEnabled = !!s.pushEdits && canPushToSource(source);
       const { pushes, finals, nextShadow } = threeWayMerge(sourceVals, localVals, shadow, pushEnabled);
+      // A write that answers "no such task" is the source telling us the
+      // mirror is stale. Trash the note and move on: there is nothing to
+      // retry and nothing to merge.
+      let gone = false;
       if (Object.keys(pushes).length) {
         try {
           await CONNECTORS[source].pushFields(s, t, pushes);
           new Notice(`Planner: pushed ${Object.keys(pushes).join(', ')} to ${SOURCES[source].label}.`);
         } catch (e) {
-          new Notice(`Planner: ${SOURCES[source].label} push failed (${e.message}). Will retry.`);
-          for (const f of Object.keys(pushes)) {
-            finals[f] = localVals[f];
-            nextShadow[f] = shadow ? shadow[f] : sourceVals[f];
+          if (isGoneError(e)) gone = true;
+          else {
+            new Notice(`Planner: ${SOURCES[source].label} push failed (${e.message}). Will retry.`);
+            for (const f of Object.keys(pushes)) {
+              finals[f] = localVals[f];
+              nextShadow[f] = shadow ? shadow[f] : sourceVals[f];
+            }
           }
         }
       }
+      if (gone) { await this.removeGoneItem(source, prior); trashed += 1; continue; }
       // Completion state, decided in one pure place (syncCompletionPlan): an
       // occurrence advance resets the check and never pushes; otherwise a
       // pending close is retried at sync time too. A reopen is never decided
@@ -7046,6 +7276,7 @@ class IcorPlannerPlugin extends Plugin {
           await this.applyDoneOnSource(prior, true);
           nextShadow.done = true;
         } catch (e) {
+          if (isGoneError(e)) { await this.removeGoneItem(source, prior); trashed += 1; continue; }
           new Notice(`Planner: ${SOURCES[source].label} close failed (${e.message}). Will retry.`);
         }
       }
@@ -7092,7 +7323,17 @@ class IcorPlannerPlugin extends Plugin {
     const stale = complete && items.length > 0
       ? reconcileStaleIds(source, allItems, openIds, (it) => scopeAgrees(s._shadow[`${source}:${it.id}`], scope))
       : [];
+    // Absence alone cannot tell "completed there" from "deleted there", and
+    // Tom's rule needs them told apart: the notes are a mirror, so a deleted
+    // task takes its note with it. One bounded GET per absent id answers it;
+    // anything short of a clear "no such task" keeps the old completion path.
+    const goneIds = await this.probeGoneIds(source, stale);
     for (const it of stale) {
+      if (goneIds.has(it.id)) {
+        await this.removeGoneItem(source, it);
+        trashed += 1;
+        continue;
+      }
       const key = `${source}:${it.id}`;
       s._shadow[key] = Object.assign({}, s._shadow[key] || {
         due: it.due, priority: it.priority, description: '',
@@ -7118,16 +7359,31 @@ class IcorPlannerPlugin extends Plugin {
     if (s.completeOnSource) {
       for (const it of allItems) {
         if (it.source !== source || openIds.has(it.id) || it.reopenPending !== true) continue;
+        // The note is already in the trash: there is nothing left to retry,
+        // and this is exactly the loop whose 404 toast came back every five
+        // minutes on a deleted task.
+        if (goneIds.has(it.id)) continue;
+        // A pending reopen is skipped by reconcileStaleIds by design, so it
+        // was never in the probe batch above. Ask about this one now: the
+        // per-sync cache means it still costs at most one GET, and this is
+        // the loop whose 404 came back every five minutes.
+        const late = await this.probeGoneIds(source, [it]);
+        if (late.has(it.id)) { await this.removeGoneItem(source, it); trashed += 1; continue; }
         const key = `${source}:${it.id}`;
         if (s._shadow[key] && s._shadow[key].done === false) continue; // already sent
         try {
           await this.applyDoneOnSource(it, false);
           s._shadow[key] = Object.assign({}, s._shadow[key] || { due: it.due, priority: it.priority, description: '' }, { done: false });
         } catch (e) {
+          // A retry aimed at a task that is not there any more is not a
+          // failure to report, it is the mirror catching up.
+          if (isGoneError(e)) { await this.removeGoneItem(source, it); trashed += 1; continue; }
           new Notice(`Planner: ${SOURCES[source].label} reopen failed (${e.message}). Will retry.`);
         }
       }
     }
+    const gnote = goneNotice(SOURCES[source].label, trashed);
+    if (gnote) new Notice(gnote, 8000);
     for (const key of pruneShadows(s._shadow, source, new Set(existing.keys()), openIds, nowMs)) {
       delete s._shadow[key];
     }
@@ -7138,6 +7394,48 @@ class IcorPlannerPlugin extends Plugin {
       const content = await this.app.vault.cachedRead(file);
       return content.replace(/^---\n[\s\S]*?\n---\n?/, '').trim();
     } catch { return ''; }
+  }
+
+  // The source says this task is not there any more. Mirror that: the note
+  // goes to the SYSTEM trash, the shadow goes, any pending push for it is
+  // dropped, and nothing is ever sent to the source about it again.
+  //
+  // `vault.trash(file, true)` rather than `fileManager.trashFile`, which
+  // obeys the member's "Deleted files" setting: one of its three values is
+  // "permanently delete", and a member on that setting would lose the note
+  // to a REMOTE signal while the settings text, the README and the CHANGELOG
+  // all promise a trash they can recover from (Flint, 2026-09-17, finding 2;
+  // Larry's ruling). A deletion the member asked for still obeys their
+  // setting; this one was not asked for here. The same method serves both discoveries: a probe during reconcile,
+  // and a write that came back 404.
+  async removeGoneItem(source, item) {
+    const key = `${source}:${item.id}`;
+    delete this.settings._shadow[key];
+    if (this._pushTimers.has(item.path)) {
+      window.clearTimeout(this._pushTimers.get(item.path));
+      this._pushTimers.delete(item.path);
+    }
+    this.clearSyncWrite(item.path);
+    if (item.file) await this.app.vault.trash(item.file, true);
+  }
+
+  // One confirming GET per absent id, bounded and asked once per sync.
+  // Returns the set of ids the source says are gone.
+  async probeGoneIds(source, items, deps) {
+    const gone = new Set();
+    if (!canProbeGone(source)) return gone;
+    // syncNow resets this at the top of every pass; an upsert driven from
+    // anywhere else still gets a set rather than a crash.
+    if (!this._goneProbed) this._goneProbed = new Set();
+    const s = this.withSecrets();
+    for (const it of goneProbeBatch(items, GONE_PROBE_MAX_PER_SYNC)) {
+      if (this._goneProbed.has(`${source}:${it.id}`)) continue;
+      this._goneProbed.add(`${source}:${it.id}`);
+      let probe = null;
+      try { probe = await CONNECTORS[source].probeGone(s, it, deps || {}); } catch { probe = null; }
+      if (absenceVerdict(probe) === 'gone') gone.add(it.id);
+    }
+    return gone;
   }
 
   // The one place a completion crosses to the source. Throws on failure.
@@ -7322,9 +7620,12 @@ class IcorPlannerPlugin extends Plugin {
     let dirty = false;
     if (sh && s.pushEdits && canPushToSource(item.source)) {
       const body = await this.readBody(file);
-      const localVals = { due: item.due, priority: item.priority, description: body };
+      const localVals = { title: item.title, due: item.due, priority: item.priority, description: body };
       const pushes = {};
       for (const f of TWO_WAY_FIELDS) {
+        // Same rule as threeWayMerge: a field the shadow has no baseline for
+        // cannot be read as a local edit. The next sync seeds it.
+        if (!(f in sh)) continue;
         const base = sh[f] == null || sh[f] === '' ? (f === 'priority' ? 5 : null) : sh[f];
         const loc = localVals[f] == null || localVals[f] === '' ? (f === 'priority' ? 5 : null) : localVals[f];
         if (loc !== base) pushes[f] = loc;
@@ -7336,6 +7637,7 @@ class IcorPlannerPlugin extends Plugin {
           dirty = true;
           new Notice(`Planner: pushed ${Object.keys(pushes).join(', ')} to ${SOURCES[item.source].label}.`);
         } catch (e) {
+          if (isGoneError(e)) { await this.removeGoneItem(item.source, item); return; }
           new Notice(`Planner: ${SOURCES[item.source].label} push failed (${e.message}). Will retry on sync.`);
         }
       }
@@ -7375,6 +7677,9 @@ class IcorPlannerPlugin extends Plugin {
           await this.app.fileManager.processFrontMatter(file, (fm) => { delete fm.reopen_pending; });
         }
       } catch (e) {
+        // The toast the member saw every five minutes on a deleted task.
+        // There is nothing to retry against a task that is not there.
+        if (isGoneError(e)) { await this.removeGoneItem(item.source, item); return; }
         new Notice(`Planner: ${item.doneLocal ? 'close' : 'reopen'} on ${SOURCES[item.source].label} failed (${e.message}). Will retry on sync.`);
       }
     }
@@ -7443,6 +7748,10 @@ class IcorPlannerPlugin extends Plugin {
   // advance and the reopen confirmation are applied to the note here, in the
   // same frontmatter write as the source pull.
   async updateItemFile(prior, t, finals, currentBody, plan) {
+    // `title` is a shared field since 0.15.0, so the settled value wins here
+    // the way `due` and `priority` already did. An empty settled title falls
+    // back to the source's: the note never blanks a task's name.
+    const wantTitle = finals.title != null && String(finals.title).trim() !== '' ? finals.title : t.title;
     const wantDue = finals.due || null;
     const wantPriority = clampPriorityRank(finals.priority);
     const wantRecurring = t.recurring == null ? null : !!t.recurring;
@@ -7451,7 +7760,7 @@ class IcorPlannerPlugin extends Plugin {
     const ops = plan || {};
     const hasOps = !!(ops.resetDoneLocal || ops.clearPlan || ops.movePlan || ops.occurrence || ops.clearReopenPending);
     const changed =
-      prior.title !== t.title || prior.due !== wantDue ||
+      prior.title !== wantTitle || prior.due !== wantDue ||
       prior.priority !== wantPriority || prior.url !== (t.url || null) ||
       prior.status === 'done' || // reopened at the source
       prior.recurring !== wantRecurring || prior.dueString !== wantDueString ||
@@ -7463,7 +7772,7 @@ class IcorPlannerPlugin extends Plugin {
     if (changed) {
       const nowIso = new Date().toISOString();
       await this.app.fileManager.processFrontMatter(prior.file, (fm) => {
-        fm.title = t.title;
+        fm.title = wantTitle;
         fm.due = wantDue;
         fm.priority = wantPriority;
         fm.url = t.url || null;
@@ -11483,7 +11792,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Two-way sync').setHeading();
     new Setting(containerEl)
       .setName('Complete on source')
-      .setDesc('What it does: checking a card here also closes the task in Todoist / ClickUp, unstars the email and marks the Outlook flag complete. Unchecking a card you had checked reopens it, also after a sync has confirmed the close. What it never does: it never changes a status at the source to make it match this vault. The source always wins. When a task is completed there, the card here simply follows and nothing is sent back, so a task you published or closed in the source app can never be reopened by the planner. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app. For Outlook this needs the Mail.ReadWrite permission, which is asked for only when you switch this on: if Outlook is signed in, a Microsoft sign-in opens to grant it (switching off does not take it back; sign out for that).')
+      .setDesc('Tasks from a connected source are a mirror: complete here and it completes there, deleted there and it disappears here (the note goes to Obsidian\'s trash, where you can get it back). What this switch does: checking a card here also closes the task in Todoist / ClickUp, unstars the email and marks the Outlook flag complete. Unchecking a card you had checked reopens it, also after a sync has confirmed the close. What it never does: it never changes a status at the source to make it match this vault. The source always wins. When a task is completed there, the card here simply follows and nothing is sent back, so a task you published or closed in the source app can never be reopened by the planner. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app. For Outlook this needs the Mail.ReadWrite permission, which is asked for only when you switch this on: if Outlook is signed in, a Microsoft sign-in opens to grant it (switching off does not take it back; sign out for that).')
       .addToggle((t) => t.setValue(this.plugin.settings.completeOnSource)
         .onChange(async (v) => {
           this.plugin.settings.completeOnSource = v;
@@ -11506,7 +11815,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
         }));
     new Setting(containerEl)
       .setName('Push edits to source')
-      .setDesc('Due date, priority and description edits in the note flow back to Todoist and ClickUp. Only fields you changed since the last sync are pushed; if both sides changed, the source wins.')
+      .setDesc('Tasks from a connected source are a mirror. Edit the title, the due date, the priority or the body of a note and the change flows back to Todoist and ClickUp. Only what you changed since the last sync is sent; if the same thing changed on both sides, the source wins and your note is updated to match. Your own planning is never sent anywhere: the day a card sits on, its order, the star for the week and the note you linked it to stay in your vault. Off = edits stay in the vault and the source still updates the note.')
       .addToggle((t) => t.setValue(this.plugin.settings.pushEdits)
         .onChange(async (v) => { this.plugin.settings.pushEdits = v; await this.plugin.saveSettings(); }));
 
@@ -11548,7 +11857,9 @@ module.exports.__test = {
   zonedToUtc, tzOffsetMinutes, hmToMin, lunchBandHeight,
   WINDOWS_TZ_TO_IANA, normalizeTzid, isIanaZone, resolveTzid, tzidUtcPrefixOffset,
   icsUtcOffsetToMinutes, ianaForOffsets, calendarTzWarning, degraded, okResult, truncatedWarning,
-  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS,
+  threeWayMerge, todoistApiPriority, TWO_WAY_FIELDS, pushableTitle,
+  goneError, isGoneError, goneProbeBatch, absenceVerdict, canProbeGone, goneNotice,
+  GONE_PROBE_MAX_PER_SYNC, todoistProbeGone, clickupProbeGone,
   htmlishToText, segmentInfo, fmtLeft, fmtDayTitle, fmtDayLabel,
   trayDefaultTab, trayVisibleTabs, trayTabLabel, trayEffectiveTab,
   trayEmptyState, trayConnectionState, TRAY_COPY, fmtOpenItems,

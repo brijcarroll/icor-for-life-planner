@@ -44,6 +44,24 @@ the others working and tells you which one broke.
 
 Every source is optional. Connect none and the board still works.
 
+## The one rule: your notes are a mirror
+
+Tasks from a connected source are a mirror of that source.
+
+- **Complete here and it completes there.** That is the "Complete on source"
+  switch, and it is off until you turn it on.
+- **Edit here and it syncs there.** Title, due date, priority and the note
+  body go back to Todoist and ClickUp, behind the "Push edits to source"
+  switch.
+- **Changed there, changed here.** Every sync pulls what changed at the
+  source. If the same thing changed on both sides, the source wins.
+- **Deleted there, it disappears here.** The note moves to Obsidian's trash,
+  where you can get it back.
+
+Your own planning is never part of this. The day a card sits on, its half of
+the day, its order, the star for the week and the note you linked it to live
+only in your vault, and no sync touches them.
+
 ## The board and the tray
 
 The **board** is your week in morning and afternoon lanes. Drag a card onto
@@ -100,9 +118,10 @@ to Todoist, ClickUp, your own IMAP host, the iCal addresses you paste, and
 Microsoft's sign-in if you use Outlook. Nothing passes through myICOR: your
 Microsoft registration is yours, and so are the tokens.
 
-**It reads by default.** The only things it ever writes back to a source are
-completing a task and clearing an email flag, and each sits behind its own
-switch that is off until you turn it on.
+**It reads by default.** It writes back only what you switched on:
+completing a task or clearing an email flag ("Complete on source"), and
+title, due date, priority and body edits ("Push edits to source"). Both are
+off until you turn them on. It never deletes anything at a source.
 
 Without a key for a source, that source is simply off.
 

@@ -529,8 +529,10 @@ test('the shipped files: README section, CHANGELOG line, the three version files
   assert.match(touches, /\*\*The services you connect, and only those\.\*\*/, 'the network disclosure');
   assert.match(touches, /Nothing passes through myICOR/, 'and that no traffic goes through us');
   assert.match(touches, /\*\*It reads by default\.\*\*/, 'the write-back disclosure');
-  assert.match(touches, /each sits behind its own\n\s*switch that is off until you turn it on/,
+  assert.match(touches, /Both are\n\s*off until you turn them on\./,
     'and that both write-backs are off until the member turns them on');
+  assert.match(touches, /It never deletes anything at a source\./,
+    'the mirror runs one way for deletion: the vault follows the source, never the reverse');
   assert.match(readme, /You do not need an account to start\./, 'the account disclosure');
   const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
   const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
