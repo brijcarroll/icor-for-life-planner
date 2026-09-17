@@ -6,6 +6,42 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.15.0] - 2026-09-17
+
+### Changed
+- **Tasks from a connected source are a mirror.** One rule, stated once and
+  true everywhere: complete here and it completes there, edit here and it
+  syncs there, changed there and it changes here, deleted there and it
+  disappears here. Your own planning is never part of that. The day a card
+  sits on, its half of the day, its order, the star for the week and the
+  note you linked it to live only in your vault, and no sync touches them.
+
+### Added
+- **A task deleted in Todoist or ClickUp now disappears from your vault
+  too.** Until now a deleted task left its note behind forever, as a card
+  you could not open and could not get rid of, and every attempt to update
+  it failed with a message you could do nothing about, over and over, every
+  five minutes. The planner now asks the source what happened before it
+  decides: a task that was completed is marked done as before, and a task
+  that is really gone takes its note with it. The note moves to Obsidian's
+  trash, so you can bring it back if you want it. You are told once per
+  sync, in plain words, and never with an error code again. The same holds
+  for starred email and Outlook flags: a message that is no longer in the
+  mailbox takes its note with it.
+- **The title of a task now syncs both ways.** Rename a task in its note and
+  the new name reaches Todoist or ClickUp, the way the due date, the
+  priority and the body already did. Rename it at the source and the note
+  follows. If you rename it in both places between two syncs, the source
+  wins and your note is updated to match.
+
+### Fixed
+- **No more repeating "HTTP 404" messages.** Any write that comes back
+  saying the task no longer exists is now understood rather than retried.
+
+### Note
+- Nothing you delete in Obsidian is ever deleted at the source. The mirror
+  runs one way for deletion: your vault follows the source.
+
 ## [0.14.3] - 2026-09-17
 
 ### Fixed
