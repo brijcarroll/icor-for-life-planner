@@ -6,6 +6,37 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.14.3] - 2026-09-17
+
+### Fixed
+- **A task you complete in Todoist or ClickUp can no longer be reopened by
+  the planner.** With Complete on source switched on, finishing a task in
+  the source app made the planner mark its card done, as it should. What it
+  then did wrong: it read its own note back a second later, decided the card
+  looked unfinished, and set the task at the source to the first open status
+  it could find. In ClickUp that meant a published podcast episode quietly
+  went back to `not started`, minutes after it was published, again and
+  again. The rule is now stated once and holds everywhere: the source
+  always wins. What happens at the source is mirrored into your vault and
+  never sent back out, and the planner never changes a status at the source
+  to make it agree with a note. Complete on source means exactly one thing,
+  which the setting now says in full: checking a card here closes the task
+  there, and unchecking a card you had checked reopens it. Nothing else
+  crosses. This affected every source that can be completed, Todoist,
+  ClickUp, starred email and Outlook flags alike, and the fix is in the one
+  place all four go through.
+
+  Two things changed underneath, and either alone would have been enough.
+  A sync now says so when it writes to a note, so the note-changed watcher
+  can tell the plugin's own hand from your edit. And when a sync marks a
+  card done because the source closed it, it writes both completion flags
+  at once, so there is no disagreement left for anything to misread.
+
+  Three new tests hold the rule in place, each one first run against the
+  old code to prove it catches the problem: a task closed at the source
+  now sends nothing back to it, a card you check here sends exactly one
+  completion, and with the setting off nothing is sent at all.
+
 ## [0.14.2] - 2026-09-16
 
 ### Fixed
