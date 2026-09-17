@@ -98,19 +98,26 @@ test('the sync confirms a reopen: the task is back in the open set, nothing is p
   assert.equal(plan.advanced, false);
 });
 
-test('the ordinary close and reopen retries at sync time are unchanged', () => {
+test('the ordinary close retry at sync time is unchanged; the reopen retry is gone (0.14.3)', () => {
   const closeRetry = T.syncCompletionPlan({
     prior: item({ doneLocal: true }), sourceItem: { due: '2026-09-01' },
     shadow: { due: '2026-09-01', done: false }, completeOnSource: true, recurringAdvance: 'move',
   });
   assert.equal(closeRetry.pushClose, true);
   assert.equal(closeRetry.pushReopen, false);
-  const reopenRetry = T.syncCompletionPlan({
+  // Until 0.14.3 this case pushed a reopen: the shadow said done, the note
+  // said open, so the plan "corrected" the source. But the item is IN the
+  // open set, which means the source ALREADY says open - the shadow is
+  // simply stale. Tom's ruling (2026-09-17): the source is the winner, the
+  // Obsidian note reflects it and never the other way round. So the plan
+  // heals the shadow and sends nothing.
+  const staleShadow = T.syncCompletionPlan({
     prior: item({ doneLocal: false }), sourceItem: { due: '2026-09-01' },
     shadow: { due: '2026-09-01', done: true }, completeOnSource: true, recurringAdvance: 'move',
   });
-  assert.equal(reopenRetry.pushReopen, true);
-  assert.equal(reopenRetry.pushClose, false);
+  assert.equal(staleShadow.pushReopen, false, 'a mismatch must never write an open status to the source');
+  assert.equal(staleShadow.pushClose, false);
+  assert.equal(staleShadow.nextShadowDone, false, 'the fetch proved the source open: the shadow heals without a write');
   const off = T.syncCompletionPlan({
     prior: item({ doneLocal: true }), sourceItem: { due: '2026-09-01' },
     shadow: { due: '2026-09-01', done: false }, completeOnSource: false, recurringAdvance: 'move',

@@ -4466,7 +4466,10 @@ function occurrenceAdvanced(prior, sourceItem, shadow) {
 //   movePlan         { day, half } to put the card on ('move' mode)
 //   clearPlan        send the card back to the tray ('drop' mode)
 //   occurrence       what to record about the finished occurrence, or null
-//   pushClose / pushReopen   the ONE call to the source, or neither
+//   pushClose        the ONE call to the source (a close), or nothing. There
+//                    is no reopen here: the source is the winner, so a
+//                    mismatch never writes an open status back to it, and
+//                    `pushReopen` is false in every plan this can return.
 //   nextShadowDone   the done flag the shadow should carry after this sync
 //   clearReopenPending       the source confirmed the reopen (the item is open)
 //   resetChildrenDoneLocal   an advance: the new occurrence's subtasks start
@@ -4476,6 +4479,11 @@ function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recur
   const base = {
     advanced: false, resetDoneLocal: false, movePlan: null, clearPlan: false,
     occurrence: null, lastCompletedDue: null,
+    // `pushReopen` is permanently false and read by nobody since 0.14.3. It
+    // is kept as part of the plan's shape so the invariant it now states is
+    // asserted rather than assumed: a sync plan CANNOT carry a reopen,
+    // because the source is the winner and only the person's own uncheck
+    // (reopen_pending) ever reopens anything there.
     pushClose: false, pushReopen: false, nextShadowDone: shadowDone,
     clearReopenPending: prior.reopenPending === true,
     resetChildrenDoneLocal: false,
@@ -4512,10 +4520,25 @@ function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recur
   const reopenedAtSource = prior.status === 'done';
   const sourceDone = (prior.reopenPending === true || reopenedAtSource) ? false : shadowDone;
   const wantDone = reopenedAtSource ? false : !!prior.doneLocal;
-  const push = !!completeOnSource && wantDone !== sourceDone;
+  // THE SOURCE IS THE WINNER (Tom's ruling, 2026-09-17). A completion may
+  // cross from here to the source; a REOPEN never crosses from a mismatch.
+  // This item is IN the open set, so the source already says open: a shadow
+  // still reading done is a stale baseline, and writing an open status back
+  // to the source so it agrees with the note is exactly the flip that reset
+  // published ClickUp tasks to `not started` (PM-12518, 2026-09-16). The one
+  // reopen that ever reaches a source is the person's own uncheck, which
+  // toggleDoneLocal marks with reopen_pending and the absent-item loop in
+  // upsertSource sends.
+  // The shadow is "what the source last agreed to", and this fetch just
+  // returned the item in the OPEN set. So unless we are keeping a close we
+  // already sent (wantDone, which is also the guard against closing a
+  // recurring task twice), the shadow heals to open here. That healing is
+  // what the removed reopen push used to achieve as a side effect of writing
+  // to the source; now it happens in the shadow alone, where it belongs.
   return {
-    ...base, resetDoneLocal: reopenedAtSource, nextShadowDone: sourceDone,
-    pushClose: push && wantDone, pushReopen: push && !wantDone,
+    ...base, resetDoneLocal: reopenedAtSource,
+    nextShadowDone: wantDone ? sourceDone : false,
+    pushClose: !!completeOnSource && wantDone && !sourceDone,
   };
 }
 
@@ -4527,6 +4550,34 @@ function syncCompletionPlan({ prior, sourceItem, shadow, completeOnSource, recur
 function reopenDecision({ statusDone, completeOnSource, synced }) {
   if (!statusDone || !synced) return 'local-only';
   return completeOnSource ? 'push' : 'refuse-local';
+}
+
+/* ---- self-write suppression (0.14.3) ------------------------------------
+ * Obsidian's metadataCache `changed` event says that a file changed and
+ * never who changed it. A sync run writes the SOURCE's own truth into a
+ * note (`status: done` from reconcile, the pulled fields from
+ * updateItemFile), the event fires on that write, and the push check then
+ * reads the plugin's own hand as a local edit and sends it back out. That
+ * is the whole of PM-12518: reconcile wrote `status: done`, the push check
+ * saw a note that looked unchecked against a shadow that said done, and
+ * PUT the list's first open status to ClickUp 1.1 seconds later.
+ *
+ * So every sync-run write stamps its path, and the push check ignores an
+ * event for a stamped path inside the window. It is deliberately NOT a
+ * blanket mute: a card action (a check, a plan move) is the person acting
+ * and stamps nothing, and toggleDoneLocal clears any stamp on its path, so
+ * a check one tick after a sync write still pushes at once.
+ *
+ * The window is a few seconds, comfortably past the 900 ms push debounce
+ * and short enough that a hand edit typed into a note the sync just touched
+ * is at worst deferred to the next sync, where threeWayMerge picks it up.
+ */
+const SYNC_WRITE_WINDOW_MS = 3000;
+function syncWriteSuppressed(stampedAtMs, nowMs, windowMs) {
+  if (!Number.isFinite(stampedAtMs) || !Number.isFinite(nowMs)) return false;
+  const w = Number.isFinite(windowMs) && windowMs > 0 ? windowMs : SYNC_WRITE_WINDOW_MS;
+  const age = nowMs - stampedAtMs;
+  return age >= 0 && age < w;
 }
 
 // Newest last, oldest dropped past the cap.
@@ -6281,6 +6332,10 @@ class IcorPlannerPlugin extends Plugin {
     // data.json beside the settings; never shown in the settings UI.
     if (!this.settings._shadow || typeof this.settings._shadow !== 'object') this.settings._shadow = {};
     this._pushTimers = new Map();
+    // path -> ms of the last write this plugin's own sync run made there.
+    // Read by the push check so a sync write is never mistaken for a local
+    // edit; see the self-write suppression block above syncWriteSuppressed.
+    this._syncWrites = new Map();
     this.routines = [];              // the parsed routine notes (refreshRoutines); render reads this
     this._routineCache = new Map();  // path -> { mtime, routine }: zero body reads when nothing changed
     this.habits = [];                // the parsed habit notes (refreshHabits); render reads this
@@ -6372,8 +6427,10 @@ class IcorPlannerPlugin extends Plugin {
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       notify(file);
       // A routine and a week note are never planner items, so there is
-      // nothing to push for either.
-      if (inside(file) && !this.paths().isRoutine(file.path) && !this.paths().isWeek(file.path)) {
+      // nothing to push for either. Neither is this plugin's own sync write:
+      // the event cannot say who wrote the file, so the sync says so itself.
+      if (inside(file) && !this.paths().isRoutine(file.path) && !this.paths().isWeek(file.path)
+        && !this.isSyncWrite(file.path)) {
         this.schedulePushCheck(file.path);
       }
     }));
@@ -6975,19 +7032,21 @@ class IcorPlannerPlugin extends Plugin {
       }
       // Completion state, decided in one pure place (syncCompletionPlan): an
       // occurrence advance resets the check and never pushes; otherwise a
-      // pending close / reopen is retried at sync time too.
+      // pending close is retried at sync time too. A reopen is never decided
+      // here - the item is in the source's open set, so the source already
+      // says open, and the source is the winner.
       const plan = syncCompletionPlan({
         prior, sourceItem: t, shadow,
         completeOnSource: !!s.completeOnSource,
         recurringAdvance: s.recurringAdvance,
       });
       nextShadow.done = plan.nextShadowDone;
-      if (plan.pushClose || plan.pushReopen) {
+      if (plan.pushClose) {
         try {
-          await this.applyDoneOnSource(prior, plan.pushClose);
-          nextShadow.done = plan.pushClose;
+          await this.applyDoneOnSource(prior, true);
+          nextShadow.done = true;
         } catch (e) {
-          new Notice(`Planner: ${SOURCES[source].label} ${plan.pushClose ? 'close' : 'reopen'} failed (${e.message}). Will retry.`);
+          new Notice(`Planner: ${SOURCES[source].label} close failed (${e.message}). Will retry.`);
         }
       }
       if (nextShadow.done && shadow && shadow.doneAt) nextShadow.doneAt = shadow.doneAt;
@@ -7004,6 +7063,7 @@ class IcorPlannerPlugin extends Plugin {
       for (const child of index.childrenOf.get(key) || []) {
         if (!openIds.has(child.id) || !child.doneLocal || !child.file) continue;
         await this.app.fileManager.processFrontMatter(child.file, (fm) => { fm.done_local = false; });
+        this.markSyncWrite(child.file.path);
         const ck = `${source}:${child.id}`;
         if (s._shadow[ck]) s._shadow[ck].done = false;
       }
@@ -7039,9 +7099,18 @@ class IcorPlannerPlugin extends Plugin {
       }, { done: true, doneAt: nowMs });
       await this.app.fileManager.processFrontMatter(it.file, (fm) => {
         fm.status = 'done';
+        // The source closed it, so the card is CHECKED here, not merely
+        // struck by its status. Leaving `done_local` false left the note in
+        // a state no person can produce - status done, check off - and the
+        // push check read exactly that as an uncheck and sent a reopen back
+        // to the source (PM-12518). The two flags now agree by construction,
+        // so there is no difference left to misread. `updateItemFile` clears
+        // both again the moment the source shows the task open.
+        fm.done_local = true;
         fm.done_at = new Date().toISOString();
         fm.synced_at = new Date().toISOString();
       });
+      this.markSyncWrite(it.file.path);
     }
     // A reopen that has not reached the source yet (the push path failed, or
     // the sync ran first): send it now. The flag is cleared only when the
@@ -7198,6 +7267,26 @@ class IcorPlannerPlugin extends Plugin {
     new Notice('Planner: signed out of Outlook. The token is gone from this vault; to revoke the app on Microsoft\'s side too, use the link in settings.', 8000);
   }
 
+  // A sync run announcing its own hand. Called by every write a sync makes
+  // to an item note, and by nothing else: a card action is the person acting
+  // and must reach the source at once.
+  markSyncWrite(path) {
+    if (!path || !this._syncWrites) return;
+    const now = Date.now();
+    for (const [p, at] of this._syncWrites) {
+      if (!syncWriteSuppressed(at, now)) this._syncWrites.delete(p);
+    }
+    this._syncWrites.set(path, now);
+  }
+
+  // The person's own action on a note the sync just wrote: the stamp goes,
+  // so the push check treats the next event as what it is.
+  clearSyncWrite(path) { if (this._syncWrites) this._syncWrites.delete(path); }
+
+  isSyncWrite(path) {
+    return !!this._syncWrites && syncWriteSuppressed(this._syncWrites.get(path), Date.now());
+  }
+
   // Debounced per-file: a local edit (user typing, a card action, or an agent
   // editing frontmatter) pushes out without waiting for the next sync.
   schedulePushCheck(path) {
@@ -7209,6 +7298,12 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   async detectAndPush(path) {
+    // Defence in depth, and the seam the regression tests drive: the
+    // `changed` handler already declines to schedule a check for a write the
+    // sync just made, and any other caller is declined here too. A sync run
+    // has just settled every field on this note against the source; there is
+    // by definition nothing local in it to push back.
+    if (this.isSyncWrite(path)) return;
     const s = this.withSecrets(); // shallow: s._shadow is the live map
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) return;
@@ -7246,11 +7341,28 @@ class IcorPlannerPlugin extends Plugin {
       }
     }
     // A reopen the card asked for (uncheck on a source-closed task) acts even
-    // when the shadow already says done; the shadow's done flag drives the
-    // plain check / uncheck as before.
+    // when the shadow already says done. It is the ONE reopen that reaches a
+    // source, and `reopen_pending` is written in exactly one place:
+    // toggleDoneLocal, on the person's own uncheck.
     const wantReopen = item.reopenPending === true && !item.doneLocal;
-    const doneDiffers = sh ? item.doneLocal !== !!sh.done : false;
-    if (s.completeOnSource && canCompleteOnSource(item.source) && (wantReopen || doneDiffers)) {
+    // A difference against the shadow may CLOSE at the source, never reopen.
+    // The source is the winner (Tom's ruling, 2026-09-17): the note reflects
+    // the source, never the other way round, so a note reading open where the
+    // shadow reads done is a note that has not caught up - or, until 0.14.3,
+    // the plugin's own reconcile write - and neither is anyone asking for a
+    // closed task to come back. The old `doneDiffers` test pushed both ways
+    // and is what reset published ClickUp tasks to `not started`.
+    // `item.status !== 'done'` is Flint's guard (2026-09-17, finding 1):
+    // `status: done` has exactly one writer, the reconcile, so it MEANS the
+    // source closed this task. A close against it is never needed, and a
+    // shadow that lost its done flag - a quit before the debounced data.json
+    // save, or a second device taking the note through Sync ahead of the
+    // settings - would otherwise read the reconcile's own `done_local: true`
+    // as intent and close it again. Harmless on Todoist, IMAP and Outlook;
+    // on a ClickUp list with more than one closed-type status it rewrites
+    // the status, which is still a source write born of a source completion.
+    const wantClose = sh ? (item.doneLocal && item.status !== 'done' && !sh.done) : false;
+    if (s.completeOnSource && canCompleteOnSource(item.source) && (wantReopen || wantClose)) {
       try {
         await this.applyDoneOnSource(item, item.doneLocal);
         if (sh) {
@@ -7313,6 +7425,7 @@ class IcorPlannerPlugin extends Plugin {
       this.settings._shadow[`${source}:${t.id}`] = {
         due: t.due || null, priority: t.priority, description: body, done: false,
       };
+      this.markSyncWrite(path);
     } catch { /* a race with another writer - the next sync settles it */ }
   }
 
@@ -7385,6 +7498,7 @@ class IcorPlannerPlugin extends Plugin {
         }
         fm.synced_at = nowIso;
       });
+      this.markSyncWrite(prior.file.path);
     }
     // Body follows the settled description, never blindly the source.
     const desc = (finals.description || '').trim();
@@ -7395,6 +7509,7 @@ class IcorPlannerPlugin extends Plugin {
           const head = m ? m[0] : '';
           return head + (desc ? desc + '\n' : '');
         });
+        this.markSyncWrite(prior.file.path);
       }
     } catch { /* body refresh is cosmetic - never fail the sync on it */ }
   }
@@ -7430,6 +7545,10 @@ class IcorPlannerPlugin extends Plugin {
     if (!(file instanceof TFile)) return false;
     const item = itemFromFile(this.app, file);
     if (!item) return false;
+    // The person acting beats any stamp a sync left on this note a moment
+    // ago: a check made one tick after a sync write must still reach the
+    // source at once, not wait for the next sync to notice it.
+    this.clearSyncWrite(path);
     if (!isDone(item)) {
       await this.app.fileManager.processFrontMatter(file, (fm) => { fm.done_local = true; });
       return true;
@@ -11364,7 +11483,7 @@ class IcorPlannerSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName('Two-way sync').setHeading();
     new Setting(containerEl)
       .setName('Complete on source')
-      .setDesc('Checking a card here also closes the task in Todoist / ClickUp, unstars the email and marks the Outlook flag complete. Unchecking reopens, re-stars or re-flags it, also after a sync has confirmed the close. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app. For Outlook this needs the Mail.ReadWrite permission, which is asked for only when you switch this on: if Outlook is signed in, a Microsoft sign-in opens to grant it (switching off does not take it back; sign out for that).')
+      .setDesc('What it does: checking a card here also closes the task in Todoist / ClickUp, unstars the email and marks the Outlook flag complete. Unchecking a card you had checked reopens it, also after a sync has confirmed the close. What it never does: it never changes a status at the source to make it match this vault. The source always wins. When a task is completed there, the card here simply follows and nothing is sent back, so a task you published or closed in the source app can never be reopened by the planner. Off = completing stays local to this vault: a task the source closed cannot be reopened from here, and a checked recurring task stays struck until it is completed in the source app. For Outlook this needs the Mail.ReadWrite permission, which is asked for only when you switch this on: if Outlook is signed in, a Microsoft sign-in opens to grant it (switching off does not take it back; sign out for that).')
       .addToggle((t) => t.setValue(this.plugin.settings.completeOnSource)
         .onChange(async (v) => {
           this.plugin.settings.completeOnSource = v;
@@ -11439,6 +11558,7 @@ module.exports.__test = {
   manualExternalId, manualItemFrontmatter, reconcileStaleIds, scopeAgrees, clickupScopeKey, EMAIL_MAX_ITEMS,
   itemFromFrontmatter, clampPriorityRank, safeBasename,
   syncCompletionPlan, occurrenceAdvanced, reopenDecision, appendOccurrence,
+  syncWriteSuppressed, SYNC_WRITE_WINDOW_MS,
   ghostItemsFor, pruneShadows, normalizeOccurrences, OCCURRENCE_CAP, DONE_SHADOW_MAX_AGE_MS,
   agendaSections, laneSequence, TRAY_TABS,
   todoistFetchOpen, clickupFetchOpen, emailFetchStarred, calendarFetchDefs,
