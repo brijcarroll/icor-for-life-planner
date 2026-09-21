@@ -6,6 +6,12 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.16.0] - 2026-09-21
+
+### Changed
+- Relicensed under MIT. Releases before 0.16.0 remain under the ICOR for Life
+  Source-Available License (Code) v1.0.
+
 ## [0.15.1] - 2026-09-17
 
 ### Fixed
