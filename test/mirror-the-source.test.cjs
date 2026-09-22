@@ -229,6 +229,32 @@ test('a probe that cannot answer never trashes anything: the old completion path
   }, null);
 });
 
+test('a ClickUp task that left the query but is still OPEN there is left alone, never marked done', async () => {
+  // Unassigned, or a subtask whose parent closed: it drops out of the
+  // assignee query while ClickUp still shows it open. Absence is the filter
+  // talking; only a done or closed status is the source saying "finished".
+  const task = (type) => async () => res(200, { id: 'x', status: { status: 'whatever', type } });
+  const openThere = await T.clickupProbeGone('tok', 'x', { requestUrl: task('custom') });
+  assert.notEqual(T.absenceVerdict(openThere), 'done', 'a custom (in progress) status is open');
+  assert.notEqual(T.absenceVerdict(await T.clickupProbeGone('tok', 'x', { requestUrl: task('open') })), 'done');
+  assert.equal(T.absenceVerdict(await T.clickupProbeGone('tok', 'x', { requestUrl: task('done') })), 'done');
+  assert.equal(T.absenceVerdict(await T.clickupProbeGone('tok', 'x', { requestUrl: task('closed') })), 'done');
+
+  const left = note('left-query');
+  const alive = note('alive');
+  const { p, trashed } = plugin({
+    _shadow: { 'clickup:left-query': shadowOf('left-query'), 'clickup:alive': shadowOf('alive') },
+  }, [left, alive]);
+  await recording(async (writes) => {
+    await p.upsertSource('clickup', { items: [openTask('alive')] });
+    assert.equal(left.fm.status, 'open', 'still open in ClickUp, so still open here');
+    assert.equal(left.fm.done_local, false);
+    assert.deepEqual(trashed, []);
+    assert.deepEqual(writes, []);
+    assert.equal(p.settings._shadow['clickup:left-query'].done, false);
+  }, openThere);
+});
+
 test("THE SCREENSHOT: a pending reopen against a deleted task is dropped, not retried", async () => {
   // Tom's toast: "Planner: reopen on ClickUp failed (ClickUp HTTP 404). Will
   // retry on sync." - forever, every five minutes.
