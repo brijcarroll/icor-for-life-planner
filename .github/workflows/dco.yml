@@ -199,5 +199,5 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "::error title=A commit is missing its sign-off line::$bad of $checked commit(s) here have no Signed-off-by line in the commit author's own name. Open Details for the one command that fixes it."
+          echo "::error title=A commit is missing its sign-off line::Sign-off missing on $bad of $checked commit(s) in this pull request. Open Details for the one command that fixes it."
           exit 1
