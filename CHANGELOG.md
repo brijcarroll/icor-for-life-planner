@@ -6,6 +6,24 @@ Versions follow [Semantic Versioning](https://semver.org/).
 Releases before 0.12.0 carry their notes on the GitHub release itself
 (the commit subjects since the previous tag).
 
+## [0.16.1] - 2026-09-23
+
+### Fixed
+- **A ClickUp task that only leaves your synced view stays open.** When a
+  task was unassigned from you, or was a subtask whose parent was closed, it
+  dropped out of what the planner syncs while it was still open in ClickUp,
+  and the planner marked its note done. It now asks ClickUp for the task's
+  status first: a task that is done or closed is completed here as before,
+  and a task that is still open is left exactly as it is. Thanks to Brian
+  Carroll (@brijcarroll) for the fix (#18, closes #17).
+- **A monthly calendar event on "the third Sunday" stays on the third
+  Sunday.** A repeating event defined by a weekday in the month, such as the
+  third Sunday or the last Friday, was repeated on the same date as the
+  first one, so from the second month on it landed on the wrong day, and a
+  moved or cancelled occurrence of it was not matched. The planner now reads
+  the weekday rule; an event that repeats on a date of the month works as
+  before. Thanks to Matt Zymet (@zymetm) for the fix (#19).
+
 ## [0.16.0] - 2026-09-21
 
 ### Changed
