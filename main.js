@@ -1997,7 +1997,9 @@ async function clickupSetClosed(token, id, listId, closed) {
 
 // Is this task still in ClickUp? 404 is the plain answer; a task in the
 // ClickUp trash answers 200 with `deleted: true`, which is the same thing
-// as far as the vault is concerned.
+// as far as the vault is concerned. A task that is there with a status that
+// is neither done nor closed answers 'open': it left the query (unassigned,
+// or its parent closed), it was not finished, and the note is left alone.
 async function clickupProbeGone(token, id, deps) {
   try {
     const res = await requestUrlOf(deps)({
@@ -2006,7 +2008,11 @@ async function clickupProbeGone(token, id, deps) {
       headers: { Authorization: token },
     });
     if (res.status === 404) return true;
-    if (res.status >= 200 && res.status < 300) return (res.json && res.json.deleted === true) ? true : false;
+    if (res.status >= 200 && res.status < 300) {
+      if (res.json && res.json.deleted === true) return true;
+      const st = (res.json && res.json.status && res.json.status.type || '').toLowerCase();
+      return st && st !== 'done' && st !== 'closed' ? 'open' : false;
+    }
     return null;
   } catch { return null; }
 }
@@ -4909,7 +4915,9 @@ function goneProbeBatch(items, max) {
 //   true  -> 'gone'  the source answered "no such task": trash the note
 //   false -> 'done'  it is there and simply not open: the rule as it was
 //   null  -> 'done'  we could not tell, so we do the harmless thing
-function absenceVerdict(probe) { return probe === true ? 'gone' : 'done'; }
+//   'open' -> 'open' it is there and still open: it left the query, not the
+//                    work, so the note is left exactly as it is
+function absenceVerdict(probe) { return probe === true ? 'gone' : probe === 'open' ? 'open' : 'done'; }
 
 // Can this source be asked at all? A connector without a probe (manual, the
 // calendars) is never asked and never has an item trashed under this rule.
@@ -7501,13 +7509,16 @@ class IcorPlannerPlugin extends Plugin {
     // Tom's rule needs them told apart: the notes are a mirror, so a deleted
     // task takes its note with it. One bounded GET per absent id answers it;
     // anything short of a clear "no such task" keeps the old completion path.
-    const goneIds = await this.probeGoneIds(source, stale);
+    const openThere = new Set();
+    const goneIds = await this.probeGoneIds(source, stale, undefined, openThere);
     for (const it of stale) {
       if (goneIds.has(it.id)) {
         await this.removeGoneItem(source, it);
         trashed += 1;
         continue;
       }
+      // Still open at the source, only outside what the fetch asked for.
+      if (openThere.has(it.id)) continue;
       const key = `${source}:${it.id}`;
       s._shadow[key] = Object.assign({}, s._shadow[key] || {
         due: it.due, priority: it.priority, description: '',
@@ -7596,8 +7607,9 @@ class IcorPlannerPlugin extends Plugin {
   }
 
   // One confirming GET per absent id, bounded and asked once per sync.
-  // Returns the set of ids the source says are gone.
-  async probeGoneIds(source, items, deps) {
+  // Returns the set of ids the source says are gone; ids the source says are
+  // still open go into `stillOpen` when the caller passes one.
+  async probeGoneIds(source, items, deps, stillOpen) {
     const gone = new Set();
     if (!canProbeGone(source)) return gone;
     // syncNow resets this at the top of every pass; an upsert driven from
@@ -7613,7 +7625,9 @@ class IcorPlannerPlugin extends Plugin {
       // (IMAP's UIDVALIDITY today). A connector that needs none ignores it.
       const probeDeps = Object.assign({}, deps || {}, { shadow: s._shadow ? (s._shadow[`${source}:${it.id}`] || null) : null });
       try { probe = await CONNECTORS[source].probeGone(s, it, probeDeps); } catch { probe = null; }
-      if (absenceVerdict(probe) === 'gone') gone.add(it.id);
+      const verdict = absenceVerdict(probe);
+      if (verdict === 'gone') gone.add(it.id);
+      else if (verdict === 'open' && stillOpen) stillOpen.add(it.id);
     }
     return gone;
   }
